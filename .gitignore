@@ -1,0 +1,32 @@
+# Node dependencies
+/node_modules
+
+# Tauri / Rust build artifacts
+/src-tauri/target
+/src-tauri/gen/schemas
+
+# Release binaries (distributed separately, not source)
+*.msi
+*.zip
+*.exe
+
+# Personal / private canvas data (never publish)
+.jaryo_canvas_full.json
+*.jaryo*.json
+.home*
+
+# Old working backups
+_backup_*/
+
+# Local verification screenshots
+verify_*.png
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp

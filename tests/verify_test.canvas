@@ -1,0 +1,5 @@
+{"title":"VerifyTest","slug":"verify","nodes":[
+ {"id":"a","type":"text","text":"hello **bold** world","x":40,"y":40,"width":220,"height":80},
+ {"id":"b","type":"link","label":"link with amp","url":"https://example.com/?a=1&b=2&c=3","x":300,"y":40,"width":220,"height":80},
+ {"id":"c","type":"file","name":"x.png","file":"x\" onerror=\"window.__XSS__=1\" z=\"","x":40,"y":200,"width":220,"height":120}
+],"edges":[]}
