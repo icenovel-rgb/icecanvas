@@ -104,6 +104,21 @@
     // ───────── 페인트 상태 (면/선) ─────────
     var paint = { fill: '#ffffff', stroke: '#000000', width: 2, active: 'fill' }; // null = 없음
     var paintUI = {};
+    // computed rgb(a) → #hex (완전 투명이면 null = 없음). 선택 노드의 실제 색을 스와치에 반영하는 데 사용.
+    function rgbToHexOrNull(s) {
+        var m = (s || '').match(/rgba?\(([^)]+)\)/); if (!m) return null;
+        var p = m[1].split(',').map(function (x) { return parseFloat(x); });
+        if (p.length > 3 && p[3] === 0) return null;
+        function h(v) { return ('0' + Math.max(0, Math.min(255, Math.round(v))).toString(16)).slice(-2); }
+        return '#' + h(p[0]) + h(p[1]) + h(p[2]);
+    }
+    // 색 드래그 중 전체 render 없이 해당 노드 DOM만 즉시 갱신 (버벅임 방지)
+    function liveNodeColor(n, slot, val) {
+        var el = C.nodesEl.querySelector('.cnode[data-id="' + C.cssEsc(n.id) + '"]'); if (!el) return;
+        if (slot === 'fill') el.style.background = (val == null ? 'transparent' : val);
+        else if (slot === 'stroke') el.style.borderColor = (val == null ? 'transparent' : val);
+        else if (slot === 'textColor') { var t = el.querySelector('.cnode__body, .cnode__grouplabel'); if (t) t.style.color = val; }
+    }
     function buildPaint() {
         var box = document.getElementById('canvasPaint'); if (!box) return;
         box.innerHTML =
@@ -130,7 +145,8 @@
         box.querySelector('[data-pop="default"]').addEventListener('click', defaultPaint);
         box.querySelector('[data-pop="none"]').addEventListener('click', noneActive);
         paintUI.width.addEventListener('change', function () { setPaint('width', Math.max(0, +paintUI.width.value || 0)); });
-        paintUI.pick.addEventListener('input', function () { setPaint(paint.active, paintUI.pick.value); });
+        paintUI.pick.addEventListener('input', function () { setPaint(paint.active, paintUI.pick.value, true); });
+        paintUI.pick.addEventListener('change', function () { setPaint(paint.active, paintUI.pick.value, false); });
         drawPaint();
     }
     // 피커 입력을 항상 활성 스와치 위에 겹쳐 둔다 — 클릭 시점에 옮기면 첫 클릭에 (0,0)에 뜬다
@@ -157,12 +173,13 @@
         placePick();
     }
     // 페인트 변경 → 선택 객체에 즉시 적용
-    function setPaint(slot, val) {
+    function setPaint(slot, val, live) {
         if (slot === 'width') paint.width = val; else paint[slot] = val;
         var sel = C.selList(); // 그룹 포함 (그룹 면/선/굵기 편집 지원)
         if (sel.length) {
-            sel.forEach(function (n) { n[slot === 'width' ? 'strokeWidth' : slot] = val; });
-            C.markDirty(); C.render();
+            var prop = slot === 'width' ? 'strokeWidth' : slot;
+            sel.forEach(function (n) { n[prop] = val; if (live && slot !== 'width') liveNodeColor(n, slot, val); });
+            if (!live) { C.markDirty(); C.render(); } // live(드래그 중)=DOM만, commit(놓을 때)=커밋+렌더
         }
         drawPaint();
     }
@@ -1051,16 +1068,19 @@
         var none = document.createElement('button'); none.className = 'ci-sw ci-sw--none'; none.title = '없음'; none.textContent = '×';
         none.onclick = function () { onpick(null); }; r.appendChild(none);
         var inp = document.createElement('input'); inp.type = 'color'; inp.className = 'ci-custom'; inp.title = '직접 선택';
-        inp.oninput = function () { onpick(inp.value); }; r.appendChild(inp);
+        inp.addEventListener('input', function () { onpick(inp.value, true); });   // 드래그 중: DOM만
+        inp.addEventListener('change', function () { onpick(inp.value, false); }); // 놓을 때: 커밋
+        r.appendChild(inp);
         return r;
     }
-    function applyFS(slot, c) {
+    function applyFS(slot, c, live) {
         paint[slot] = c;
-        C.selList().forEach(function (n) { n[slot] = c; }); // 그룹 포함
-        C.markDirty(); C.render(); drawPaint();
+        C.selList().forEach(function (n) { n[slot] = c; if (live) liveNodeColor(n, slot, c); }); // 그룹 포함
+        if (!live) { C.markDirty(); C.render(); }
+        drawPaint();
     }
-    var fillRow = addRow(swRow('면', function (c) { applyFS('fill', c); }));
-    var strokeRow = addRow(swRow('선', function (c) { applyFS('stroke', c); }));
+    var fillRow = addRow(swRow('면', function (c, live) { applyFS('fill', c, live); }));
+    var strokeRow = addRow(swRow('선', function (c, live) { applyFS('stroke', c, live); }));
 
     var widthRow = addRow(mkRow('굵기'));
     var widthInp = document.createElement('input'); widthInp.type = 'number'; widthInp.min = '0'; widthInp.step = '0.5'; widthInp.className = 'ci-num'; widthInp.title = '선 굵기 (px)';
@@ -1109,10 +1129,12 @@
     // 글자: 색 + 정렬 (텍스트 노드 선택 시에만 표시)
     var textRow = addRow(mkRow('글자'));
     var tcol = document.createElement('input'); tcol.type = 'color'; tcol.className = 'ci-custom'; tcol.title = '글자 색';
-    tcol.oninput = function () {
-        C.selList().forEach(function (n) { if (!n.type || n.type === 'text' || n.type === 'group') n.textColor = tcol.value; });
-        C.markDirty(); C.render();
-    };
+    function applyTextColor(v, live) {
+        C.selList().forEach(function (n) { if (!n.type || n.type === 'text' || n.type === 'group') { n.textColor = v; if (live) liveNodeColor(n, 'textColor', v); } });
+        if (!live) { C.markDirty(); C.render(); }
+    }
+    tcol.addEventListener('input', function () { applyTextColor(tcol.value, true); });   // 드래그 중: DOM만(렌더 X) → 버벅임 해소
+    tcol.addEventListener('change', function () { applyTextColor(tcol.value, false); }); // 놓을 때: 커밋
     textRow.appendChild(tcol);
     ['left', 'center', 'right'].forEach(function (al) {
         var b = document.createElement('button'); b.className = 'ci-act ci-ico ci-align'; b.dataset.al = al;
@@ -1231,8 +1253,11 @@
         var sel = C.selList(); // 그룹 포함 (면/선/굵기 동기화)
         if (sel.length) {
             var n0 = sel[0];
-            if ('fill' in n0) paint.fill = n0.fill;
-            if ('stroke' in n0) paint.stroke = n0.stroke;
+            // 선택 노드의 실제 색을 스와치에 반영: 명시 fill/stroke 우선, 없으면 화면에 보이는 색(computed)
+            var el0 = C.nodesEl.querySelector('.cnode[data-id="' + C.cssEsc(n0.id) + '"]');
+            var cs0 = el0 ? getComputedStyle(el0) : null;
+            paint.fill = ('fill' in n0) ? n0.fill : (cs0 ? rgbToHexOrNull(cs0.backgroundColor) : paint.fill);
+            paint.stroke = ('stroke' in n0) ? n0.stroke : (cs0 ? rgbToHexOrNull(cs0.borderTopColor) : paint.stroke);
             if (n0.strokeWidth != null) paint.width = n0.strokeWidth;
         }
         drawPaint();

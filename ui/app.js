@@ -242,7 +242,7 @@
                 inner += '<button type="button" class="cnode__fold" title="접기/펼치기">' + (n.collapsed ? '▸' : '▾') + '</button>';
             }
             if (admin && !n.locked) {
-                if (n.type !== 'group' && n.type !== 'artboard') {
+                if (n.type !== 'artboard') {   // 그룹도 연결점 표시(라인 연결 가능), 아트보드만 제외
                     inner += '<span class="chandle chandle--r" data-side="right"></span><span class="chandle chandle--l" data-side="left"></span>' +
                         '<span class="chandle chandle--t" data-side="top"></span><span class="chandle chandle--b" data-side="bottom"></span>';
                 }
@@ -549,7 +549,7 @@
     function closestConnectTarget(from, p) {
         var best = null, bestD = CONNECT_SNAP / view.scale;
         nodes.forEach(function (n) {
-            if (n === from || isContainer(n)) return;
+            if (n === from || n.type === 'artboard') return; // 그룹은 연결 가능, 아트보드만 제외
             ['left', 'right', 'top', 'bottom'].forEach(function (side) {
                 var sp = sidePoint(n, side), d = Math.hypot(sp.x - p.x, sp.y - p.y);
                 if (d < bestD) { bestD = d; best = { node: n, side: side, point: sp }; }
@@ -734,11 +734,13 @@
             if (dir.indexOf('s') >= 0) nh = oh + dy;
             if (dir.indexOf('w') >= 0) { nw = ow - dx; nx = ox + dx; }
             if (dir.indexOf('n') >= 0) { nh = oh - dy; ny = oy + dy; }
-            // 움직이는 변을 다른 노드의 모서리/중심에 스냅 + 가이드선
-            if (dir.indexOf('e') >= 0) { var se = snap1([nx + nw, nx + nw, nx + nw], xt, T); if (se) { nw += se.delta; gx = se.guide; } }
-            if (dir.indexOf('w') >= 0) { var swp = snap1([nx, nx, nx], xt, T); if (swp) { nx += swp.delta; nw -= swp.delta; gx = swp.guide; } }
-            if (dir.indexOf('s') >= 0) { var ss = snap1([ny + nh, ny + nh, ny + nh], yt, T); if (ss) { nh += ss.delta; gy = ss.guide; } }
-            if (dir.indexOf('n') >= 0) { var sn = snap1([ny, ny, ny], yt, T); if (sn) { ny += sn.delta; nh -= sn.delta; gy = sn.guide; } }
+            // 움직이는 변을 다른 노드의 모서리/중심에 스냅 + 가이드선 (Alt=중심 기준이라 스냅 생략)
+            if (!e.altKey) {
+                if (dir.indexOf('e') >= 0) { var se = snap1([nx + nw, nx + nw, nx + nw], xt, T); if (se) { nw += se.delta; gx = se.guide; } }
+                if (dir.indexOf('w') >= 0) { var swp = snap1([nx, nx, nx], xt, T); if (swp) { nx += swp.delta; nw -= swp.delta; gx = swp.guide; } }
+                if (dir.indexOf('s') >= 0) { var ss = snap1([ny + nh, ny + nh, ny + nh], yt, T); if (ss) { nh += ss.delta; gy = ss.guide; } }
+                if (dir.indexOf('n') >= 0) { var sn = snap1([ny, ny, ny], yt, T); if (sn) { ny += sn.delta; nh -= sn.delta; gy = sn.guide; } }
+            }
             if (nw < minW) { if (dir.indexOf('w') >= 0) nx -= (minW - nw); nw = minW; }
             if (nh < minH) { if (dir.indexOf('n') >= 0) ny -= (minH - nh); nh = minH; }
             var ar = lockAR || (e.shiftKey && oh > 0 ? ow / oh : 0); // Shift = 비율 유지
@@ -746,6 +748,17 @@
                 if (dir === 'n' || dir === 's') { var w2 = nh * ar; nx = ox + (ow - w2) / 2; nw = w2; }
                 else { var h2 = nw / ar; if (dir.indexOf('n') >= 0) ny = oy + oh - h2; nh = h2; }
                 gx = null; gy = null; // 비율 고정 중엔 스냅 가이드 생략
+            }
+            // Alt = 중심 고정, 양쪽으로 대칭 확장 (대각 핸들이면 전방향)
+            if (e.altKey) {
+                var cax = ox + ow / 2, cay = oy + oh / 2;
+                var altW = (dir.indexOf('e') >= 0 || dir.indexOf('w') >= 0);
+                var altH = (dir.indexOf('n') >= 0 || dir.indexOf('s') >= 0);
+                if (altW) nw = Math.max(minW, ow + (nw - ow) * 2);
+                if (altH) nh = Math.max(minH, oh + (nh - oh) * 2);
+                if (ar) { if (altW) nh = nw / ar; else if (altH) nw = nh * ar; } // 비율 유지 시 보조축 유도
+                nx = cax - nw / 2; ny = cay - nh / 2;
+                gx = null; gy = null;
             }
             n.x = nx; n.y = ny; n.width = nw; n.height = nh;
             var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(n.id) + '"]'); if (el) { el.style.left = nx + 'px'; el.style.top = ny + 'px'; el.style.width = nw + 'px'; el.style.height = nh + 'px'; }
@@ -776,8 +789,8 @@
             var overContainer = false;
             if (!target && tEl && tEl.dataset.id !== from.id) {
                 var raw = nodeById(tEl.dataset.id);
-                if (raw && !isContainer(raw)) target = { node: raw, side: nearestSide(raw, w.x, w.y) };
-                else if (raw && isContainer(raw)) overContainer = true; // 그룹/아트보드 위 = 빈 곳처럼 새 노드 생성(위치상 자동 포함)
+                if (raw && raw.type !== 'artboard') target = { node: raw, side: nearestSide(raw, w.x, w.y) }; // 노드·그룹에 연결
+                else if (raw && raw.type === 'artboard') overContainer = true; // 아트보드 위 = 새 노드 생성(슬라이드에 포함)
             }
             if (target) {
                 edges.push({ id: uid('e'), fromNode: from.id, fromSide: side, toNode: target.node.id, toSide: target.side });
