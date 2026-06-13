@@ -73,6 +73,32 @@ fn decode_data_url(data_url: &str) -> Result<Vec<u8>, String> {
         .map_err(|err| err.to_string())
 }
 
+/// Guess a file extension from the data-URL mime so the OS can pick a handler.
+fn ext_from_data_url(data_url: &str) -> Option<&'static str> {
+    let head = data_url.split(',').next().unwrap_or("").to_ascii_lowercase();
+    if head.contains("application/pdf") {
+        Some("pdf")
+    } else {
+        None
+    }
+}
+
+/// Path under %TEMP%/ICE Canvas for an attachment opened by the OS default app.
+fn temp_attachment_path(filename: &str, data_url: &str) -> Result<PathBuf, String> {
+    let mut name = sanitize_name(filename);
+    if Path::new(&name).extension().is_none() {
+        if let Some(ext) = ext_from_data_url(data_url) {
+            name.push('.');
+            name.push_str(ext);
+        }
+    }
+    let mut dir = std::env::temp_dir();
+    dir.push("ICE Canvas");
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    dir.push(name);
+    Ok(dir)
+}
+
 #[tauri::command]
 fn get_startup_canvas(state: State<AppState>) -> Result<Option<CanvasFile>, String> {
     let Some(arg) = std::env::args_os().nth(1) else {
@@ -183,6 +209,64 @@ fn open_in_browser(url: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn shell_open(file: &str, params: Option<&str>) -> isize {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation = HSTRING::from("open");
+    let file_h = HSTRING::from(file);
+    let result = if let Some(p) = params {
+        let params_h = HSTRING::from(p);
+        unsafe {
+            ShellExecuteW(Some(HWND::default()), &operation, &file_h, &params_h, None, SW_SHOWNORMAL)
+        }
+    } else {
+        unsafe {
+            ShellExecuteW(Some(HWND::default()), &operation, &file_h, None, None, SW_SHOWNORMAL)
+        }
+    };
+    result.0 as isize
+}
+
+/// Open a saved file with the OS default handler. On Windows, if no app is
+/// associated with the extension (SE_ERR_NOASSOC), fall back to Microsoft Edge.
+fn open_path_default(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // ShellExecuteW returns a value > 32 on success.
+        if shell_open(path, None) > 32 {
+            return Ok(());
+        }
+        let quoted = format!("\"{}\"", path);
+        if shell_open("msedge.exe", Some(&quoted)) > 32 {
+            return Ok(());
+        }
+        Err("Failed to open attachment".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let prog = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(prog)
+            .arg(path)
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+}
+
+/// Write a data-URL attachment (e.g. a PDF) to a temp file and open it with the
+/// system default app (falling back to Edge on Windows when nothing is associated).
+#[tauri::command]
+fn open_attachment(data_url: String, filename: String) -> Result<(), String> {
+    let bytes = decode_data_url(&data_url)?;
+    let path = temp_attachment_path(&filename, &data_url)?;
+    fs::write(&path, &bytes).map_err(|err| err.to_string())?;
+    open_path_default(&path_to_string(&path))
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState {
@@ -194,6 +278,7 @@ fn main() {
             save_canvas,
             save_canvas_as,
             save_attachment,
+            open_attachment,
             open_in_browser
         ])
         .run(tauri::generate_context!())

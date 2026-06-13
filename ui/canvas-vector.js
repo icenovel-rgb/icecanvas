@@ -493,9 +493,9 @@
     var ds = { node: null, sel: -1, cps: {} };
     function exitDirect() { ds.node = null; ds.sel = -1; ds.cps = {}; clearOv(); }
     function cpKey(id, kind) { return id + '|' + kind; }
-    // 제어점: 박스(패스 아님)는 네 모서리(tl/tr/bl/br), 패스는 앵커(index). 그룹은 제외.
+    // 제어점: 박스(패스 아님)는 네 모서리(tl/tr/bl/br), 패스는 앵커(index). 그룹은 박스처럼 프레임 조정 가능, 아트보드(16:9 고정)·잠금은 제외.
     function cpList(n) {
-        if (n.type === 'group') return [];
+        if (n.locked || n.type === 'artboard') return [];
         if (n.type === 'path') {
             var k = p2w(n);
             return n.points.map(function (p, i) { return { id: n.id, kind: i, x: n.x + p.x * k.x, y: n.y + p.y * k.y }; });
@@ -565,7 +565,7 @@
     function directDown(ev) {
         var t = ev.target;
         if (t.dataset && t.dataset.vecCp) {                     // 횡단 제어점(박스 모서리·타 패스 앵커) 드래그
-            if (ev.shiftKey) { var c0 = ds.cps[t.dataset.vecCp]; if (c0) { delete ds.cps[t.dataset.vecCp]; drawAnchors(); } return; }
+            if (ev.shiftKey) { if (ds.cps[t.dataset.vecCp]) { delete ds.cps[t.dataset.vecCp]; syncDsAfterCps(); drawAnchors(); } return; } // Shift+클릭 = 선택 제외
             dragCPs(ev); return;
         }
         if (t.dataset && t.dataset.vecAnchor != null && ds.node) {
@@ -581,11 +581,14 @@
             if (ev.altKey) { removeHandle(t.dataset.vecHandle); return; }  // Alt+클릭=한쪽 핸들 삭제
             dragHandle(t.dataset.vecHandle, ev); return;
         }
+        // 라인(엣지) 클릭 선택 — 직접선택툴로 연결선 선택(Shift=다중 토글) → Delete로 삭제
+        var edgeEl = t.closest ? t.closest('.cedge') : null;
+        if (edgeEl && edgeEl.dataset && edgeEl.dataset.id) { exitDirect(); C.selectEdge(edgeEl.dataset.id, ev.shiftKey); return; }
         var wpt = C.screenToWorld(ev.clientX, ev.clientY);
         var ne = t.closest ? t.closest('.cnode') : null;
         if (ne) {
             var n = C.nodeById(ne.dataset.id);
-            if (n && n.type === 'path') {
+            if (n && n.type === 'path' && !n.locked && !ev.shiftKey) {   // Shift는 아래 마퀴(추가 선택)로 흘려보낸다
                 ds.node = n; ds.sel = -1; ds.cps = {}; C.selectOne(n.id);
                 if (ev.altKey) {  // Alt+클릭(선분) = 모양을 유지하며 앵커 추가, 바로 드래그 가능
                     var hit = segHit(n, wpt);
@@ -596,8 +599,8 @@
                 return;
             }
         }
-        // DOM이 못 잡은 얇은 선도 기하 판정(8px 허용오차)으로 집는다 — 면 없는 패스 편집의 핵심
-        var ghit = pathHitAll(wpt);
+        // DOM이 못 잡은 얇은 선도 기하 판정(8px 허용오차)으로 집는다 — 면 없는 패스 편집의 핵심 (Shift면 건너뛰고 마퀴로)
+        var ghit = ev.shiftKey ? null : pathHitAll(wpt);
         if (ghit) {
             ds.node = ghit.n; ds.sel = -1; ds.cps = {}; C.selectOne(ghit.n.id);
             if (ev.altKey) { var ni2 = insertAnchor(ghit.n, ghit); livePath(); dragAnchor(ni2, ev); return; }
@@ -607,8 +610,18 @@
         }
         cpMarquee(ev); // 빈 곳/박스 위에서 드래그 = 오브젝트 횡단 제어점 마퀴 (클릭만 하면 선택 해제)
     }
-    // 드래그 박스로 모든 오브젝트의 제어점(박스 모서리·패스 앵커)을 선택
+    // ds.cps 집합으로부터 활성 패스(단일 패스면)·강조 객체(C.selNodes)를 재계산
+    function syncDsAfterCps() {
+        var ids = {};
+        Object.keys(ds.cps).forEach(function (key) { ids[ds.cps[key].id] = true; });
+        var idList = Object.keys(ids);
+        var only = idList.length === 1 ? C.nodeById(idList[0]) : null;
+        ds.node = (only && only.type === 'path') ? only : null; ds.sel = -1;
+        C.selNodes = {}; idList.forEach(function (id) { C.selNodes[id] = true; }); C.refreshSel();
+    }
+    // 드래그 박스로 모든 오브젝트의 제어점(박스 모서리·패스 앵커)을 선택. Shift = 기존 선택에 추가(합집합).
     function cpMarquee(ev) {
+        var add = ev.shiftKey;
         var s = C.screenToWorld(ev.clientX, ev.clientY);
         var rect = null, moved = false;
         var box = ovEl('rect', { x: s.x, y: s.y, width: 0, height: 0, fill: 'rgba(45,139,139,0.12)', stroke: '#2d8b8b', 'stroke-width': 1 / C.view.scale, 'stroke-dasharray': (3 / C.view.scale) + ' ' + (3 / C.view.scale) });
@@ -621,18 +634,23 @@
         }
         function up() {
             document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
-            if (!moved || !rect) { exitDirect(); C.clearSel(); C.refreshSel(); return; }
-            ds.cps = {}; var ids = {};
+            if (!moved || !rect) {
+                if (add) { drawAnchors(); }                          // Shift+클릭 = 현재 선택 유지
+                else { exitDirect(); C.clearSel(); C.refreshSel(); } // 단순 클릭 = 선택 해제
+                return;
+            }
+            if (!add) ds.cps = {};                                   // Shift 아니면 새로 선택, Shift면 합집합
             C.nodes.forEach(function (n) {
                 cpList(n).forEach(function (cp) {
-                    if (cp.x >= rect.x && cp.x <= rect.x + rect.w && cp.y >= rect.y && cp.y <= rect.y + rect.h) { ds.cps[cpKey(cp.id, cp.kind)] = { id: cp.id, kind: cp.kind }; ids[cp.id] = true; }
+                    if (cp.x >= rect.x && cp.x <= rect.x + rect.w && cp.y >= rect.y && cp.y <= rect.y + rect.h) { ds.cps[cpKey(cp.id, cp.kind)] = { id: cp.id, kind: cp.kind }; }
                 });
             });
-            // 선택 제어점이 한 패스에만 속하면 그 패스를 활성화(핸들/삭제 편집 가능)
-            var idList = Object.keys(ids);
-            var only = idList.length === 1 ? C.nodeById(idList[0]) : null;
-            ds.node = (only && only.type === 'path') ? only : null; ds.sel = -1;
-            C.selNodes = {}; idList.forEach(function (id) { C.selNodes[id] = true; }); C.refreshSel(); // 영향받는 오브젝트 강조
+            // 제어점이 하나도 안 잡히면 영역을 지나는 라인(엣지)을 모두 선택 (드래그로 라인 다중 선택, Shift=추가)
+            if (!Object.keys(ds.cps).length) {
+                var eh = C.edgesInRect(rect);
+                if (eh.length) { exitDirect(); C.selectEdges(eh, add); return; }
+            }
+            syncDsAfterCps();   // 선택 제어점이 한 패스에만 속하면 그 패스를 활성화(핸들/삭제 편집 가능)
             drawAnchors();
         }
         document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
@@ -641,7 +659,7 @@
     function pathHitAll(w) {
         for (var i = C.nodes.length - 1; i >= 0; i--) {
             var n = C.nodes[i];
-            if (n.type !== 'path') continue;
+            if (n.type !== 'path' || n.locked) continue;
             var hit = segHit(n, w);
             if (hit) return { n: n, i: hit.i, t: hit.t };
         }
@@ -992,9 +1010,11 @@
             return;
         }
         if (e.ctrlKey || e.metaKey || e.altKey) return;
-        // 정렬 단축키: q 위·u 아래·l 왼쪽·r 오른쪽·h 세로중앙·c 가로중앙 (2개+ 선택 시에만 — 아니면 l 등은 도구 단축키로)
+        // 정렬 단축키: q 위·u 아래·l 왼쪽·r 오른쪽·h 세로중앙·c 가로중앙 (2개+ 선택 또는 컨테이너 1개 선택 시 — 아니면 l 등은 도구 단축키로)
         var am = { q: 'top', u: 'bottom', l: 'left', r: 'right', h: 'centerV', c: 'centerH' }[(k || '').toLowerCase()];
-        if (am && (cpAlignActive() || C.selList().length >= 2)) {
+        var asl = C.selList();
+        var singleContainer = asl.length === 1 && (asl[0].type === 'group' || asl[0].type === 'artboard');
+        if (am && (cpAlignActive() || asl.length >= 2 || singleContainer)) {
             e.preventDefault(); e.stopImmediatePropagation();
             C.alignSel(am); // 직접선택+앵커면 인터셉터가 앵커 정렬로, 아니면 노드 정렬
             return;
@@ -1039,8 +1059,8 @@
         C.selList().forEach(function (n) { n[slot] = c; }); // 그룹 포함
         C.markDirty(); C.render(); drawPaint();
     }
-    addRow(swRow('면', function (c) { applyFS('fill', c); }));
-    addRow(swRow('선', function (c) { applyFS('stroke', c); }));
+    var fillRow = addRow(swRow('면', function (c) { applyFS('fill', c); }));
+    var strokeRow = addRow(swRow('선', function (c) { applyFS('stroke', c); }));
 
     var widthRow = addRow(mkRow('굵기'));
     var widthInp = document.createElement('input'); widthInp.type = 'number'; widthInp.min = '0'; widthInp.step = '0.5'; widthInp.className = 'ci-num'; widthInp.title = '선 굵기 (px)';
@@ -1098,7 +1118,7 @@
         var b = document.createElement('button'); b.className = 'ci-act ci-ico ci-align'; b.dataset.al = al;
         b.title = { left: '왼쪽 정렬', center: '가운데 정렬', right: '오른쪽 정렬' }[al]; b.innerHTML = ALIGN_ICON[al];
         b.onclick = function () {
-            C.selList().forEach(function (n) { if (!n.type || n.type === 'text') { if (al === 'left') delete n.align; else n.align = al; } });
+            C.selList().forEach(function (n) { if (!n.type || n.type === 'text' || n.type === 'group') { if (al === 'left') delete n.align; else n.align = al; } });
             C.markDirty(); C.render();
         };
         textRow.appendChild(b);
@@ -1121,6 +1141,24 @@
     var fsPlus = document.createElement('button'); fsPlus.className = 'ci-step'; fsPlus.textContent = '+'; fsPlus.title = '크게'; fsPlus.onclick = function () { bumpFont(2); };
     sizeRow.appendChild(fsMinus); sizeRow.appendChild(fontInp); sizeRow.appendChild(fsPlus);
 
+    // 여백: − [숫자] + (내부 패딩 — 텍스트 노드·그룹 제목에 적용, 비우면 기본값)
+    function isPaddable(n) { return !n.type || n.type === 'text' || n.type === 'group'; }
+    var DEFAULT_PAD = 12;
+    var padRow = addRow(mkRow('여백'));
+    function bumpPad(delta) {
+        C.selList().forEach(function (n) { if (isPaddable(n)) { var cur = n.padding != null ? n.padding : DEFAULT_PAD; n.padding = Math.max(0, Math.min(80, cur + delta)); } });
+        C.markDirty(); C.render();
+    }
+    var pdMinus = document.createElement('button'); pdMinus.className = 'ci-step'; pdMinus.textContent = '−'; pdMinus.title = '여백 줄이기'; pdMinus.onclick = function () { bumpPad(-2); };
+    var padInp = document.createElement('input'); padInp.type = 'number'; padInp.min = '0'; padInp.max = '80'; padInp.className = 'ci-num'; padInp.placeholder = 'px'; padInp.title = '내부 여백 (px)';
+    padInp.addEventListener('change', function () {
+        var v = padInp.value === '' ? -1 : (+padInp.value);
+        C.selList().forEach(function (n) { if (isPaddable(n)) { if (v >= 0) n.padding = Math.max(0, Math.min(80, v)); else delete n.padding; } });
+        C.markDirty(); C.render();
+    });
+    var pdPlus = document.createElement('button'); pdPlus.className = 'ci-step'; pdPlus.textContent = '+'; pdPlus.title = '여백 늘리기'; pdPlus.onclick = function () { bumpPad(2); };
+    padRow.appendChild(pdMinus); padRow.appendChild(padInp); padRow.appendChild(pdPlus);
+
     // 링크: 표시 이름 + 주소 (링크 노드 하나만 선택 시 표시)
     function onlyLink() { var s = C.selList(); return (s.length === 1 && s[0].type === 'link') ? s[0] : null; }
     var linkNameRow = addRow(mkRow('이름'));
@@ -1138,6 +1176,41 @@
     var groupNameInp = document.createElement('input'); groupNameInp.type = 'text'; groupNameInp.className = 'ci-text'; groupNameInp.placeholder = '그룹 이름';
     groupNameInp.addEventListener('input', function () { var g = onlyGroup(); if (!g) return; g.label = groupNameInp.value; C.markDirty(); C.render(); });
     groupNameRow.appendChild(groupNameInp);
+
+    // 아트보드: 이름 / 번호(순서) / 전환효과 — 아트보드 하나만 선택 시 표시
+    function onlyArtboard() { var s = C.selList(); return (s.length === 1 && s[0].type === 'artboard') ? s[0] : null; }
+    var abNameRow = addRow(mkRow('이름'));
+    var abNameInp = document.createElement('input'); abNameInp.type = 'text'; abNameInp.className = 'ci-text'; abNameInp.placeholder = '아트보드 이름';
+    abNameInp.addEventListener('input', function () { var a = onlyArtboard(); if (!a) return; a.name = abNameInp.value; C.markDirty(); C.render(); });
+    abNameRow.appendChild(abNameInp);
+
+    var abIdxRow = addRow(mkRow('번호'));
+    function moveArtboard(ab, dir) {
+        var abs = C.nodes.filter(function (n) { return n.type === 'artboard'; }).sort(function (a, b) { return (a.index || 0) - (b.index || 0); });
+        var i = abs.indexOf(ab), j = i + dir; if (j < 0 || j >= abs.length) return;
+        var t = ab.index || 0; ab.index = abs[j].index || 0; abs[j].index = t; C.markDirty(); C.render();
+    }
+    var abIdxDown = document.createElement('button'); abIdxDown.className = 'ci-step'; abIdxDown.textContent = '↑'; abIdxDown.title = '순서 앞으로'; abIdxDown.onclick = function () { var a = onlyArtboard(); if (a) moveArtboard(a, -1); };
+    var abIdxInp = document.createElement('input'); abIdxInp.type = 'number'; abIdxInp.min = '1'; abIdxInp.className = 'ci-num'; abIdxInp.title = '슬라이드 번호';
+    abIdxInp.addEventListener('change', function () { var a = onlyArtboard(); if (!a) return; a.index = Math.max(1, +abIdxInp.value || 1); C.markDirty(); C.render(); });
+    var abIdxUp = document.createElement('button'); abIdxUp.className = 'ci-step'; abIdxUp.textContent = '↓'; abIdxUp.title = '순서 뒤로'; abIdxUp.onclick = function () { var a = onlyArtboard(); if (a) moveArtboard(a, 1); };
+    abIdxRow.appendChild(abIdxDown); abIdxRow.appendChild(abIdxInp); abIdxRow.appendChild(abIdxUp);
+
+    // 배경색: 슬라이드쇼에서도 그대로 적용됨 (기본 흰색)
+    var abBgRow = addRow(mkRow('배경'));
+    var abBgInp = document.createElement('input'); abBgInp.type = 'color'; abBgInp.className = 'ci-custom'; abBgInp.title = '슬라이드 배경색';
+    abBgInp.addEventListener('input', function () { var a = onlyArtboard(); if (!a) return; a.bg = abBgInp.value; C.markDirty(); C.render(); });
+    var abBgWhite = document.createElement('button'); abBgWhite.className = 'ci-step'; abBgWhite.textContent = '⌫'; abBgWhite.title = '흰색으로 초기화';
+    abBgWhite.onclick = function () { var a = onlyArtboard(); if (!a) return; delete a.bg; C.markDirty(); C.render(); };
+    abBgRow.appendChild(abBgInp); abBgRow.appendChild(abBgWhite);
+
+    var abTransRow = addRow(mkRow('전환'));
+    var abTransSel = document.createElement('select'); abTransSel.className = 'ci-select'; abTransSel.title = '슬라이드 전환 효과';
+    [['none', '없음'], ['fade', '페이드'], ['slide', '밀기']].forEach(function (o) {
+        var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; abTransSel.appendChild(op);
+    });
+    abTransSel.addEventListener('change', function () { var a = onlyArtboard(); if (!a) return; a.transition = abTransSel.value; C.markDirty(); });
+    abTransRow.appendChild(abTransSel);
 
     // 파일: 표시 이름 변경 (파일 노드 하나만 선택 시 표시 — 실제 업로드 파일은 그대로, 표시명만 바뀜)
     function onlyFile() { var s = C.selList(); return (s.length === 1 && s[0].type === 'file') ? s[0] : null; }
@@ -1168,11 +1241,14 @@
         var anyGroup = sel.some(function (n) { return n.type === 'group'; });
         textRow.style.display = (anyText || anyGroup) ? '' : 'none';   // 글자색은 텍스트·그룹 모두
         sizeRow.style.display = (anyText || anyGroup) ? '' : 'none';    // 글자크기도 텍스트·그룹 모두
-        var tNode = sel.filter(function (n) { return !n.type || n.type === 'text'; })[0];                          // 정렬 대상(텍스트만)
-        var cNode = sel.filter(function (n) { return !n.type || n.type === 'text' || n.type === 'group'; })[0];    // 글자색·크기 대상(텍스트+그룹)
+        var padNode = sel.filter(isPaddable)[0];
+        padRow.style.display = (anyText || anyGroup) ? '' : 'none';     // 여백도 텍스트·그룹
+        if (padNode && document.activeElement !== padInp) padInp.value = padNode.padding != null ? padNode.padding : '';
+        var tNode = sel.filter(function (n) { return !n.type || n.type === 'text' || n.type === 'group'; })[0];     // 정렬 대상(텍스트+그룹)
+        var cNode = tNode;                                                                                         // 글자색·크기 대상(텍스트+그룹)
         if (cNode && document.activeElement !== fontInp) fontInp.value = cNode.fontSize || '';
         if (cNode && cNode.textColor && /^#[0-9a-f]{6}$/i.test(cNode.textColor)) tcol.value = cNode.textColor;
-        textRow.querySelectorAll('.ci-align').forEach(function (b) { b.style.display = anyText ? '' : 'none'; b.classList.toggle('is-on', !!tNode && (tNode.align || 'left') === b.dataset.al); });
+        textRow.querySelectorAll('.ci-align').forEach(function (b) { b.style.display = (anyText || anyGroup) ? '' : 'none'; b.classList.toggle('is-on', !!tNode && (tNode.align || 'left') === b.dataset.al); });
         var lk = onlyLink();
         linkNameRow.style.display = lk ? '' : 'none';
         linkUrlRow.style.display = lk ? '' : 'none';
@@ -1183,6 +1259,22 @@
         var gp = onlyGroup();
         groupNameRow.style.display = gp ? '' : 'none';
         if (gp && document.activeElement !== groupNameInp) groupNameInp.value = gp.label || '';
+        var ab = onlyArtboard();
+        abNameRow.style.display = ab ? '' : 'none';
+        abIdxRow.style.display = ab ? '' : 'none';
+        abBgRow.style.display = ab ? '' : 'none';
+        abTransRow.style.display = ab ? '' : 'none';
+        if (ab) {
+            if (document.activeElement !== abNameInp) abNameInp.value = ab.name || '';
+            if (document.activeElement !== abIdxInp) abIdxInp.value = ab.index || '';
+            if (document.activeElement !== abBgInp) abBgInp.value = (ab.bg && /^#[0-9a-f]{6}$/i.test(ab.bg)) ? ab.bg : '#ffffff';
+            abTransSel.value = ab.transition || 'none';
+        }
+        // 아트보드만 선택 시 면·선·굵기 행 숨김(배경은 위 '배경'으로 조절)
+        var onlyAbs = sel.length > 0 && sel.every(function (n) { return n.type === 'artboard'; });
+        fillRow.style.display = onlyAbs ? 'none' : '';
+        strokeRow.style.display = onlyAbs ? 'none' : '';
+        widthRow.style.display = onlyAbs ? 'none' : '';
         var fl = onlyFile();
         fileNameRow.style.display = fl ? '' : 'none';
         if (fl && document.activeElement !== fileNameInp) fileNameInp.value = fl.name || '';

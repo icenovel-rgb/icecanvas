@@ -37,11 +37,15 @@
     return invoke('save_attachment', { dataUrl: dataUrl, filename: filename || 'attachment' });
   }
 
+  async function openAttachment(dataUrl, filename) {
+    return invoke('open_attachment', { dataUrl: dataUrl, filename: filename || 'attachment' });
+  }
+
   async function openInBrowser(url) {
     return invoke('open_in_browser', { url: url });
   }
 
-  window.ICECanvasNative = { open: open, save: save, saveAs: saveAs, saveAttachment: saveAttachment, openInBrowser: openInBrowser };
+  window.ICECanvasNative = { open: open, save: save, saveAs: saveAs, saveAttachment: saveAttachment, openAttachment: openAttachment, openInBrowser: openInBrowser };
 
   invoke('get_startup_canvas').then(function (file) {
     if (!file) return;
