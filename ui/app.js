@@ -29,6 +29,7 @@
     var selEdges = {};
     var dirty = false;
     var spaceDown = false;
+    var eyedrop = false;        // 스포이드(i): 다음 클릭한 노드의 속성을 선택 노드에 복제
     var activeVid = null;       // 재생 중인 유튜브 노드 id (한 번에 하나)
     var copyNodeEl = null;
     var lastMouse = { x: 0, y: 0 };
@@ -71,6 +72,20 @@
         var a = p.length > 3 ? parseFloat(p[3]) : 1;
         return 'rgba(' + p[0] + ',' + p[1] + ',' + p[2] + ',' + (a * mult) + ')';
     }
+    // ── 다크모드 색 자동 보정: 커스텀 색의 명도를 반전해 대비 유지(색조는 보존, 비파괴=렌더에서만) ──
+    function _hsl(r, g, b) { r /= 255; g /= 255; b /= 255; var mx = Math.max(r, g, b), mn = Math.min(r, g, b), h = 0, s = 0, l = (mx + mn) / 2; if (mx !== mn) { var d = mx - mn; s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; } return [h, s, l]; }
+    function _h2(p, q, t) { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1 / 6) return p + (q - p) * 6 * t; if (t < 1 / 2) return q; if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; }
+    function _rgb(h, s, l) { var r, g, b; if (s === 0) { r = g = b = l; } else { var q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q; r = _h2(p, q, h + 1 / 3); g = _h2(p, q, h); b = _h2(p, q, h - 1 / 3); } return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]; }
+    function adaptDark(hex) {
+        if (!hex || hex[0] !== '#') return hex;
+        var h = hex.slice(1); if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; if (h.length !== 6) return hex;
+        var hsl = _hsl(parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16));
+        hsl[2] = Math.min(0.92, Math.max(0.08, 1 - hsl[2]));   // 명도 반전 + 클램프(순흑·순백 방지)
+        var o = _rgb(hsl[0], hsl[1], hsl[2]);
+        function x(v) { return ('0' + v.toString(16)).slice(-2); }
+        return '#' + x(o[0]) + x(o[1]) + x(o[2]);
+    }
+    function themeColor(hex) { return stage.classList.contains('is-dark') ? adaptDark(hex) : hex; }
     function nodeById(id) { for (var i = 0; i < nodes.length; i++) if (nodes[i].id === id) return nodes[i]; return null; }
     function selList() { return Object.keys(selNodes).map(nodeById).filter(Boolean); }
 
@@ -87,7 +102,14 @@
             if (m) return '<span class="cnh cnh' + m[1].length + '">' + m[2] + '</span>';
             return ln;
         });
-        return lines.join('<br>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        return lines.join('<br>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/~~([^~]+)~~/g, '<s>$1</s>')
+            .replace(/__([^_]+)__/g, '<u>$1</u>');
+    }
+    // 노드 전체에 적용하는 글자 서식(볼드/밑줄/취소선) → 인라인 스타일
+    function fmtStyle(n) {
+        return (n.bold ? 'font-weight:700;' : '') + ((n.underline || n.strike) ? 'text-decoration:' + (n.underline ? 'underline ' : '') + (n.strike ? 'line-through' : '') + ';' : '');
     }
 
     // ───────── 기하 ─────────
@@ -152,8 +174,8 @@
             if (col && !ext) { d.style.borderColor = col; d.style.background = hexA(col, 0.10); }
             if (!ext) {
                 // 면/선/굵기 (벡터 페인트 시스템과 동일 모델, null = 없음)
-                if ('fill' in n) d.style.background = (n.fill == null ? 'transparent' : n.fill);
-                if ('stroke' in n) d.style.borderColor = (n.stroke == null ? 'transparent' : n.stroke);
+                if ('fill' in n) d.style.background = (n.fill == null ? 'transparent' : themeColor(n.fill));
+                if ('stroke' in n) d.style.borderColor = (n.stroke == null ? 'transparent' : themeColor(n.stroke));
                 if (n.strokeWidth != null) d.style.borderWidth = n.strokeWidth + 'px';
                 if ('fill' in n && n.fill == null) d.classList.add('cnode--noshadow'); // 면 없음 = 그림자도 없음
             }
@@ -220,7 +242,7 @@
                 }
             } else if (n.type === 'group') {
                 d.classList.add('cnode--group');
-                var gst = (n.textColor ? 'color:' + esc(n.textColor) + ';' : '') + (n.fontSize ? 'font-size:' + (+n.fontSize || 18) + 'px;' : '') + (n.align ? 'text-align:' + esc(n.align) + ';' : '');
+                var gst = (n.textColor ? 'color:' + esc(themeColor(n.textColor)) + ';' : '') + (n.fontSize ? 'font-size:' + (+n.fontSize || 18) + 'px;' : '') + (n.align ? 'text-align:' + esc(n.align) + ';' : '') + fmtStyle(n);
                 inner = '<div class="cnode__grouplabel"' + (gst ? ' style="' + gst + '"' : '') + '>' + esc(n.label || '') + '</div>';
             } else if (n.type === 'artboard') {
                 d.classList.add('cnode--artboard');
@@ -231,9 +253,9 @@
                     '<span class="cnode__abnum">' + esc(String(anum)) + '</span>' +
                     '<span class="cnode__abname">' + esc(n.name || '아트보드') + '</span></div>';
             } else {
-                var stl = (n.textColor ? 'color:' + esc(n.textColor) + ';' : '') +
+                var stl = (n.textColor ? 'color:' + esc(themeColor(n.textColor)) + ';' : '') +
                     (n.align ? 'text-align:' + esc(n.align) + ';' : '') +
-                    (n.fontSize ? 'font-size:' + (+n.fontSize || 14) + 'px;' : '');
+                    (n.fontSize ? 'font-size:' + (+n.fontSize || 14) + 'px;' : '') + fmtStyle(n);
                 var st = stl ? ' style="' + stl + '"' : '';
                 inner = '<div class="cnode__body"' + st + '>' + fmtText(n.text || '') + '</div>';
             }
@@ -480,6 +502,7 @@
     nodesEl.addEventListener('mousedown', function (ev) {
         if (stage.classList.contains('is-presenting')) return; // 슬라이드쇼 중 노드 편집 금지
         var nodeEl = ev.target.closest('.cnode'); if (!nodeEl) return;
+        if (eyedrop) { ev.preventDefault(); ev.stopPropagation(); applyEyedrop(nodeEl.dataset.id); return; } // 스포이드: 클릭한 노드 속성 복제
         // 더블클릭 편집 중인 입력 필드(제목/본문/링크) 클릭·드래그 = 텍스트 선택·커서 이동만, 노드는 움직이지 않음
         if (ev.target.closest('.cnode__edit, .cnode__editline') || ev.target.isContentEditable) { ev.stopPropagation(); return; }
         if (spaceDown || ev.button === 1) { ev.preventDefault(); startPan(ev); return; }  // 스페이스/가운데버튼 = 화면 이동
@@ -818,7 +841,42 @@
         body.innerHTML = ''; body.style.overflow = 'hidden'; body.appendChild(ta); ta.focus({ preventScroll: true }); ta.select(); // 편집 중엔 body 스크롤 끄고 textarea만 스크롤(이중 스크롤 방지)
         function done() { n.text = ta.value; markDirty(); render(); }
         ta.addEventListener('blur', done);
-        ta.addEventListener('keydown', function (e) { if (e.key === 'Escape') ta.blur(); e.stopPropagation(); });
+        ta.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') { ta.blur(); }
+            else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); wrapSelection(ta, n, '**'); }   // 볼드
+            else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'u' || e.key === 'U')) { e.preventDefault(); wrapSelection(ta, n, '__'); }   // 밑줄
+            else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); wrapSelection(ta, n, '~~'); }    // 취소선
+            e.stopPropagation();
+        });
+    }
+    // 편집 중 선택 글자를 마커(**볼드·__밑줄·~~취소선)로 감싸기(토글)
+    function wrapSelection(ta, n, mk) {
+        var s = ta.selectionStart, e = ta.selectionEnd, v = ta.value, inside = v.slice(s, e);
+        var wrapped = e > s && v.slice(Math.max(0, s - mk.length), s) === mk && v.slice(e, e + mk.length) === mk;
+        if (wrapped) { ta.value = v.slice(0, s - mk.length) + inside + v.slice(e + mk.length); ta.setSelectionRange(s - mk.length, e - mk.length); }
+        else { var sel = inside || '텍스트'; ta.value = v.slice(0, s) + mk + sel + mk + v.slice(e); ta.setSelectionRange(s + mk.length, s + mk.length + sel.length); }
+        if (n) n.text = ta.value; markDirty();
+    }
+    function activeEditor() { return nodesEl.querySelector('.cnode__edit'); }
+    // 서식: 편집 중이면 선택 글자에, 아니면 선택 노드 전체에(토글)
+    function applyFormat(kind) {
+        var mk = kind === 'underline' ? '__' : kind === 'strike' ? '~~' : '**';
+        var ta = activeEditor();
+        if (ta) { var ne = ta.closest('.cnode'); wrapSelection(ta, ne && nodeById(ne.dataset.id), mk); ta.focus(); return; }
+        selList().forEach(function (n) { if (!n.type || n.type === 'text' || n.type === 'group') { if (n[kind]) delete n[kind]; else n[kind] = true; } });
+        markDirty(); render();
+    }
+    // 스포이드(i): source 노드의 외형 속성을 선택 노드들에 복제
+    var EYEDROP_PROPS = ['color', 'fill', 'stroke', 'strokeWidth', 'textColor', 'fontSize', 'radius', 'padding', 'align', 'bold', 'underline', 'strike'];
+    function setEyedrop(on) { eyedrop = on; stage.classList.toggle('is-eyedrop', on); }
+    function applyEyedrop(sourceId) {
+        var src = nodeById(sourceId), targets = selList();
+        if (!src || !targets.length) { setEyedrop(false); return; }
+        targets.forEach(function (t) {
+            if (t.id === src.id) return;
+            EYEDROP_PROPS.forEach(function (p) { if (p in src) t[p] = src[p]; else delete t[p]; });
+        });
+        setEyedrop(false); markDirty(); render(); toast('속성 복제됨 → ' + targets.length + '개');
     }
     function editLineInto(container, value, placeholder, onsave) {
         var inp = document.createElement('input'); inp.className = 'cnode__editline'; inp.value = value || ''; if (placeholder) inp.placeholder = placeholder;
@@ -880,6 +938,8 @@
         // F: 선택 노드 접기/펼치기 (방문자도 가능 — 비영구)
         if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'f' || e.key === 'F') && Object.keys(selNodes).length) { e.preventDefault(); foldSelection(); return; }
         if (!admin) return;
+        if (e.key === 'Escape' && eyedrop) { e.preventDefault(); setEyedrop(false); toast('스포이드 취소'); return; }
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); if (!Object.keys(selNodes).length) toast('먼저 복제받을 노드를 선택하세요'); else { setEyedrop(true); toast('스포이드: 복제할 원본 노드를 클릭하세요 (Esc 취소)'); } return; }
         if (e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === 'Digit2') { e.preventDefault(); toggleLockSelection(); return; } // Shift+2 = 잠금/해제 토글
         if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
         if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return; }
@@ -1321,7 +1381,7 @@
     }
 
     function applyDark(on) { stage.classList.toggle('is-dark', on); var b = document.getElementById('canvasDark'); if (b) b.textContent = on ? '☀️' : '🌙'; }
-    function toggleDark() { var on = !stage.classList.contains('is-dark'); applyDark(on); try { localStorage.setItem('canvasDark', on ? '1' : '0'); } catch (x) {} }
+    function toggleDark() { var on = !stage.classList.contains('is-dark'); applyDark(on); try { localStorage.setItem('canvasDark', on ? '1' : '0'); } catch (x) {} render(); /* 커스텀 색 자동 보정 다시 적용 */ }
     applyDark((function () { try { return localStorage.getItem('canvasDark') === '1'; } catch (x) { return false; } })());
 
     function cleanToast(m) {
@@ -1536,6 +1596,7 @@
         selectOne: selectOne, clearSel: clearSel, selList: selList, nodeById: nodeById,
         selectEdge: selectEdge, selectEdges: selectEdges, edgesInRect: edgesInRect,
         uid: uid, esc: esc, cssEsc: cssEsc, toast: toast, nodeRect: nodeRect,
+        themeColor: themeColor, applyFormat: applyFormat,
         alignSel: alignSel,
         setAlignInterceptor: function (fn) { alignInterceptor = fn; },
         registerRenderer: function (t, fn) { extRenderers[t] = fn; },

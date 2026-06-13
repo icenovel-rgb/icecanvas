@@ -112,12 +112,13 @@
         function h(v) { return ('0' + Math.max(0, Math.min(255, Math.round(v))).toString(16)).slice(-2); }
         return '#' + h(p[0]) + h(p[1]) + h(p[2]);
     }
-    // 색 드래그 중 전체 render 없이 해당 노드 DOM만 즉시 갱신 (버벅임 방지)
+    // 색 드래그 중 전체 render 없이 해당 노드 DOM만 즉시 갱신 (버벅임 방지). 다크모드 자동 보정 반영.
     function liveNodeColor(n, slot, val) {
         var el = C.nodesEl.querySelector('.cnode[data-id="' + C.cssEsc(n.id) + '"]'); if (!el) return;
-        if (slot === 'fill') el.style.background = (val == null ? 'transparent' : val);
-        else if (slot === 'stroke') el.style.borderColor = (val == null ? 'transparent' : val);
-        else if (slot === 'textColor') { var t = el.querySelector('.cnode__body, .cnode__grouplabel'); if (t) t.style.color = val; }
+        var v = (C.themeColor && val != null) ? C.themeColor(val) : val;
+        if (slot === 'fill') el.style.background = (val == null ? 'transparent' : v);
+        else if (slot === 'stroke') el.style.borderColor = (val == null ? 'transparent' : v);
+        else if (slot === 'textColor') { var t = el.querySelector('.cnode__body, .cnode__grouplabel'); if (t) t.style.color = v; }
     }
     function buildPaint() {
         var box = document.getElementById('canvasPaint'); if (!box) return;
@@ -1145,6 +1146,13 @@
         };
         textRow.appendChild(b);
     });
+    // 서식: 볼드 / 밑줄 / 취소선 — 편집 중이면 선택 글자, 아니면 노드 전체(토글)
+    [['bold', 'B', '볼드 (Ctrl+B / 드래그한 글자 또는 노드 전체)'], ['underline', 'U', '밑줄 (Ctrl+U)'], ['strike', 'S', '취소선 (Ctrl+Shift+S)']].forEach(function (o) {
+        var b = document.createElement('button'); b.className = 'ci-act ci-fmt ci-fmt--' + o[0]; b.dataset.fmt = o[0]; b.textContent = o[1]; b.title = o[2];
+        b.addEventListener('mousedown', function (e) { e.preventDefault(); }); // 편집 중 textarea 포커스 유지
+        b.onclick = function () { C.applyFormat(o[0]); };
+        textRow.appendChild(b);
+    });
 
     // 크기: − [숫자] + (텍스트 노드·그룹 제목 선택 시 표시)
     var sizeRow = addRow(mkRow('크기'));
@@ -1274,6 +1282,7 @@
         if (cNode && document.activeElement !== fontInp) fontInp.value = cNode.fontSize || '';
         if (cNode && cNode.textColor && /^#[0-9a-f]{6}$/i.test(cNode.textColor)) tcol.value = cNode.textColor;
         textRow.querySelectorAll('.ci-align').forEach(function (b) { b.style.display = (anyText || anyGroup) ? '' : 'none'; b.classList.toggle('is-on', !!tNode && (tNode.align || 'left') === b.dataset.al); });
+        textRow.querySelectorAll('.ci-fmt').forEach(function (b) { b.classList.toggle('is-on', !!tNode && !!tNode[b.dataset.fmt]); });
         var lk = onlyLink();
         linkNameRow.style.display = lk ? '' : 'none';
         linkUrlRow.style.display = lk ? '' : 'none';

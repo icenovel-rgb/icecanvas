@@ -754,3 +754,13 @@ body { background: var(--paper); }
   .cm-nav { white-space: nowrap; width: auto; }
   .cm-item { grid-template-columns: 1fr; gap: 3px; }
 }
+
+/* 스포이드 모드 (i) — 클릭으로 속성 복제 */
+.canvas-stage.is-eyedrop, .canvas-stage.is-eyedrop .cnode { cursor: crosshair !important; }
+.canvas-stage.is-eyedrop .cnode:hover { box-shadow: 0 0 0 2px var(--teal), var(--shadow-md); }
+
+/* 인스펙터 글자 서식 버튼 (B/U/S) */
+.ci-fmt { width: 30px; padding: 0; font-weight: 700; font-size: 13px; }
+.ci-fmt--bold { font-weight: 800; }
+.ci-fmt--underline { text-decoration: underline; }
+.ci-fmt--strike { text-decoration: line-through; }
