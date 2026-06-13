@@ -1149,8 +1149,8 @@
     // 서식: 볼드 / 밑줄 / 취소선 — 편집 중이면 선택 글자, 아니면 노드 전체(토글)
     [['bold', 'B', '볼드 (Ctrl+B / 드래그한 글자 또는 노드 전체)'], ['underline', 'U', '밑줄 (Ctrl+U)'], ['strike', 'S', '취소선 (Ctrl+Shift+S)']].forEach(function (o) {
         var b = document.createElement('button'); b.className = 'ci-act ci-fmt ci-fmt--' + o[0]; b.dataset.fmt = o[0]; b.textContent = o[1]; b.title = o[2];
-        b.addEventListener('mousedown', function (e) { e.preventDefault(); }); // 편집 중 textarea 포커스 유지
-        b.onclick = function () { C.applyFormat(o[0]); };
+        b.onclick = function () { C.applyFormat(o[0]); }; // 편집 중이면 닫히며 그 선택 범위에, 아니면 노드 전체에 적용
+
         textRow.appendChild(b);
     });
 

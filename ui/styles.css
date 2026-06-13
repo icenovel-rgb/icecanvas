@@ -561,7 +561,7 @@ body:has(.canvas-page) .footer { display: none; }
 
 /* ── 벡터 도구 (펜/도형/직접선택) ── */
 .rail-btn.is-on { background: var(--color-bg-muted); color: var(--teal); }
-.canvas-stage.mode-pen, .canvas-stage.mode-pen .cnode,
+.canvas-stage.mode-pen, .canvas-stage.mode-pen .cnode { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M5 17 L13 5 L17 9 L9 17 Z' fill='%23ffffff' stroke='%23222222' stroke-width='1.2' stroke-linejoin='round'/%3E%3Cpath d='M5 17 L8 16 L6 14 Z' fill='%23222222'/%3E%3C/svg%3E") 5 17, crosshair !important; }
 .canvas-stage.mode-shape, .canvas-stage.mode-shape .cnode { cursor: crosshair !important; }
 .canvas-stage.mode-direct, .canvas-stage.mode-direct .cnode { cursor: default !important; }
 .canvas-vecov { position: absolute; left: 0; top: 0; width: 2px; height: 2px; overflow: visible; pointer-events: none; z-index: 30; }
@@ -755,9 +755,11 @@ body { background: var(--paper); }
   .cm-item { grid-template-columns: 1fr; gap: 3px; }
 }
 
-/* 스포이드 모드 (i) — 클릭으로 속성 복제 */
-.canvas-stage.is-eyedrop, .canvas-stage.is-eyedrop .cnode { cursor: crosshair !important; }
+/* 스포이드 모드 (i·도구상자) — 클릭으로 속성 복제. Space 중엔(.is-pan) 핸드툴 커서로 양보 */
+.canvas-stage.is-eyedrop, .canvas-stage.is-eyedrop .cnode { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M14 2.5a2 2 0 0 1 2.6 2.6l-1.3 1.3.9.9-1.2 1.2-.9-.9-5.1 5.1-2.6.7.7-2.6 5.1-5.1-.9-.9 1.2-1.2.9.9 1.3-1.3z' fill='%23ffffff' stroke='%23222222' stroke-width='1.1' stroke-linejoin='round'/%3E%3C/svg%3E") 4 18, crosshair !important; }
 .canvas-stage.is-eyedrop .cnode:hover { box-shadow: 0 0 0 2px var(--teal), var(--shadow-md); }
+.canvas-stage.is-eyedrop.is-pan, .canvas-stage.is-eyedrop.is-pan .cnode { cursor: grab !important; }
+.canvas-stage.is-eyedrop.is-panning, .canvas-stage.is-eyedrop.is-panning .cnode { cursor: grabbing !important; }
 
 /* 인스펙터 글자 서식 버튼 (B/U/S) */
 .ci-fmt { width: 30px; padding: 0; font-weight: 700; font-size: 13px; }

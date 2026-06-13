@@ -30,6 +30,7 @@
     var dirty = false;
     var spaceDown = false;
     var eyedrop = false;        // 스포이드(i): 다음 클릭한 노드의 속성을 선택 노드에 복제
+    var lastEdit = null;        // 방금 편집한 노드·선택 범위 (아이콘 클릭으로 편집기가 닫혀도 그 범위에 서식 적용)
     var activeVid = null;       // 재생 중인 유튜브 노드 id (한 번에 하나)
     var copyNodeEl = null;
     var lastMouse = { x: 0, y: 0 };
@@ -502,7 +503,7 @@
     nodesEl.addEventListener('mousedown', function (ev) {
         if (stage.classList.contains('is-presenting')) return; // 슬라이드쇼 중 노드 편집 금지
         var nodeEl = ev.target.closest('.cnode'); if (!nodeEl) return;
-        if (eyedrop) { ev.preventDefault(); ev.stopPropagation(); applyEyedrop(nodeEl.dataset.id); return; } // 스포이드: 클릭한 노드 속성 복제
+        if (eyedrop && !spaceDown && ev.button !== 1) { ev.preventDefault(); ev.stopPropagation(); applyEyedrop(nodeEl.dataset.id); return; } // 스포이드: 클릭한 노드 속성 복제 (스페이스/가운데버튼 중엔 핸드툴로 양보)
         // 더블클릭 편집 중인 입력 필드(제목/본문/링크) 클릭·드래그 = 텍스트 선택·커서 이동만, 노드는 움직이지 않음
         if (ev.target.closest('.cnode__edit, .cnode__editline') || ev.target.isContentEditable) { ev.stopPropagation(); return; }
         if (spaceDown || ev.button === 1) { ev.preventDefault(); startPan(ev); return; }  // 스페이스/가운데버튼 = 화면 이동
@@ -840,7 +841,7 @@
         var ta = document.createElement('textarea'); ta.className = 'cnode__edit'; ta.value = n.text || '';
         body.innerHTML = ''; body.style.overflow = 'hidden'; body.appendChild(ta); ta.focus({ preventScroll: true }); ta.select(); // 편집 중엔 body 스크롤 끄고 textarea만 스크롤(이중 스크롤 방지)
         function done() { n.text = ta.value; markDirty(); render(); }
-        ta.addEventListener('blur', done);
+        ta.addEventListener('blur', function () { lastEdit = { id: n.id, start: ta.selectionStart, end: ta.selectionEnd, t: Date.now() }; done(); }); // 닫히기 직전 선택 범위 기억
         ta.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') { ta.blur(); }
             else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); wrapSelection(ta, n, '**'); }   // 볼드
@@ -858,17 +859,33 @@
         if (n) n.text = ta.value; markDirty();
     }
     function activeEditor() { return nodesEl.querySelector('.cnode__edit'); }
-    // 서식: 편집 중이면 선택 글자에, 아니면 선택 노드 전체에(토글)
+    // 문자열 [s,e) 구간을 마커로 감싸기/벗기기 (토글)
+    function wrapText(text, s, e, mk) {
+        s = Math.max(0, Math.min(s, text.length)); e = Math.max(s, Math.min(e, text.length));
+        var inside = text.slice(s, e);
+        if (text.slice(Math.max(0, s - mk.length), s) === mk && text.slice(e, e + mk.length) === mk) return text.slice(0, s - mk.length) + inside + text.slice(e + mk.length);
+        return text.slice(0, s) + mk + (inside || '텍스트') + mk + text.slice(e);
+    }
+    // 서식: ① 편집 중이면 선택 글자에 ② 방금 닫힌 편집의 부분 선택이 있으면 그 범위에 ③ 아니면 노드 전체 토글
     function applyFormat(kind) {
         var mk = kind === 'underline' ? '__' : kind === 'strike' ? '~~' : '**';
         var ta = activeEditor();
         if (ta) { var ne = ta.closest('.cnode'); wrapSelection(ta, ne && nodeById(ne.dataset.id), mk); ta.focus(); return; }
+        if (lastEdit && selNodes[lastEdit.id] && lastEdit.end > lastEdit.start && Date.now() - lastEdit.t < 1500) {
+            var ln = nodeById(lastEdit.id);
+            if (ln) { ln.text = wrapText(ln.text || '', lastEdit.start, lastEdit.end, mk); lastEdit = null; markDirty(); render(); return; }
+        }
         selList().forEach(function (n) { if (!n.type || n.type === 'text' || n.type === 'group') { if (n[kind]) delete n[kind]; else n[kind] = true; } });
         markDirty(); render();
     }
     // 스포이드(i): source 노드의 외형 속성을 선택 노드들에 복제
     var EYEDROP_PROPS = ['color', 'fill', 'stroke', 'strokeWidth', 'textColor', 'fontSize', 'radius', 'padding', 'align', 'bold', 'underline', 'strike'];
     function setEyedrop(on) { eyedrop = on; stage.classList.toggle('is-eyedrop', on); }
+    // 스포이드 시작: 대상이 없으면 안내, 있으면 모드 진입 (단축키 i·도구상자 버튼 공용)
+    function startEyedrop() {
+        if (!Object.keys(selNodes).length) { toast('먼저 복제받을 노드를 선택하세요'); return; }
+        setEyedrop(true); toast('스포이드: 복제할 원본 노드를 클릭하세요 (Esc 취소 · Space로 화면 이동)');
+    }
     function applyEyedrop(sourceId) {
         var src = nodeById(sourceId), targets = selList();
         if (!src || !targets.length) { setEyedrop(false); return; }
@@ -939,7 +956,11 @@
         if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'f' || e.key === 'F') && Object.keys(selNodes).length) { e.preventDefault(); foldSelection(); return; }
         if (!admin) return;
         if (e.key === 'Escape' && eyedrop) { e.preventDefault(); setEyedrop(false); toast('스포이드 취소'); return; }
-        if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); if (!Object.keys(selNodes).length) toast('먼저 복제받을 노드를 선택하세요'); else { setEyedrop(true); toast('스포이드: 복제할 원본 노드를 클릭하세요 (Esc 취소)'); } return; }
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); startEyedrop(); return; }
+        // 글자 서식: 노드 선택 상태에서 Ctrl+B/U, Ctrl+Shift+S (편집 중엔 textarea가 따로 처리). preventDefault로 브라우저 기본(소스보기 등) 차단.
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B') && Object.keys(selNodes).length) { e.preventDefault(); applyFormat('bold'); return; }
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'u' || e.key === 'U') && Object.keys(selNodes).length) { e.preventDefault(); applyFormat('underline'); return; }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S') && Object.keys(selNodes).length) { e.preventDefault(); applyFormat('strike'); return; }
         if (e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === 'Digit2') { e.preventDefault(); toggleLockSelection(); return; } // Shift+2 = 잠금/해제 토글
         if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
         if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return; }
@@ -1198,6 +1219,7 @@
             else if (a === 'add-link') addNode('link');
             else if (a === 'add-artboard') addArtboard();
             else if (a === 'lock-toggle') toggleLockSelection();
+            else if (a === 'eyedrop') startEyedrop();
             else if (a === 'group') { if (selList().some(function (n) { return n.type === 'group'; })) ungroupSelection(); else groupSelection(); }
             else if (a === 'fit') fit();
             else if (a === 'zoom-in') zoomBy(1.25);
