@@ -531,6 +531,15 @@ body:has(.canvas-page) .footer { display: none; }
 .canvas-stage.is-dark .cnode__grouplabel { color: #a8dadc; text-shadow: 0 1px 2px rgba(0,0,0,.45); }
 .canvas-stage.is-dark .cnode--group { background: rgba(168,218,220,.06); border-color: var(--teal); }
 .canvas-stage.is-dark .cnode--group.is-sel { background: rgba(125,211,252,.10); border-color: #7dd3fc; }
+/* 격리(그룹 안 편집) — 그룹 밖은 흐리고 클릭 안 됨, 그룹 프레임은 또렷한 경계로 */
+.cnode--isodim { opacity: .22 !important; pointer-events: none !important; filter: saturate(.55); transition: opacity .15s ease; }
+.cnode--isoframe { pointer-events: none; box-shadow: 0 0 0 1.5px var(--teal); }
+.canvas-stage.is-dark .cnode--isoframe { box-shadow: 0 0 0 1.5px #7dd3fc; }
+.canvas-isobar { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 50; display: flex; align-items: center; gap: 12px; max-width: 80%; padding: 6px 8px 6px 14px; background: var(--teal); color: #fff; border-radius: 999px; box-shadow: var(--shadow-md); font-size: var(--text-sm); font-weight: 600; }
+.canvas-isobar__path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.canvas-isobar__hint { opacity: .85; font-weight: 500; white-space: nowrap; }
+.canvas-isobar__exit { flex: none; border: none; background: rgba(255,255,255,.22); color: #fff; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; font-size: 13px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+.canvas-isobar__exit:hover { background: rgba(255,255,255,.42); }
 .canvas-stage.is-dark .celabel { fill: #cdd9e5; }
 .canvas-stage.is-dark .canvas-inspector { background: #1d2530; border-color: #2c3a4a; }
 .canvas-stage.is-dark .ci-act { background: #232c38; color: #e6edf3; border-color: #2c3a4a; }
@@ -723,6 +732,7 @@ body { background: var(--paper); }
 .canvas-stage.is-presenting .canvas-inspector,
 .canvas-stage.is-presenting .canvas-marquee,
 .canvas-stage.is-presenting .cguide,
+.canvas-stage.is-presenting .canvas-isobar,
 .canvas-stage.is-presenting .cnode__abbar { display: none !important; }
 .canvas-stage.is-presenting .cnode--artboard { border-color: transparent; box-shadow: none; }
 .present-bar { position: absolute; background: #000; z-index: 60; pointer-events: none; }

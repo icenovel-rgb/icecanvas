@@ -97,6 +97,8 @@
         if (!ne) return;
         var n = C.nodeById(ne.dataset.id);
         if (!n || !isImgFile(n)) return;
+        // 그룹 안 이미지는 먼저 그룹에 진입(격리)해야 크롭 — 코어 더블클릭이 처리하도록 통과시킨다
+        if (C.directlyEditable && !C.directlyEditable(n)) return;
         ev.stopImmediatePropagation(); ev.preventDefault();
         start(n);
     }, true);

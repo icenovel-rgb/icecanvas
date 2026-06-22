@@ -38,6 +38,8 @@
     var CONNECT_SNAP = 24;
     var COLLAPSE_H = 132, FOLD_MIN = 200;  // 접었을 때 높이 / 접기 버튼이 뜨는 최소 높이
     var alignInterceptor = null;           // 벡터 모듈이 직접선택 앵커 정렬을 가로채는 훅
+    var isoPath = [];                      // 격리(그룹 안 편집) 스택 — 맨 끝 = 현재 편집 중인 그룹 id
+    var isoMembers = null;                 // 현재 격리 그룹의 자손 집합 (render에서 갱신, renderEdges·marquee가 참조)
     var past = [], future = [], present = JSON.stringify({ nodes: nodes, edges: edges });  // undo/redo
 
     var extRenderers = {};   // 확장 모듈이 등록하는 노드 타입 렌더러 (예: 'path')
@@ -134,6 +136,79 @@
     function groupMemberPoint(n) { return { x: n.x + (n.width || 250) / 2, y: n.y + Math.min((n.height || 60) / 2, 20) }; }
     // 컨테이너(자식을 품는 프레임): 그룹·아트보드. 이동 시 내부 노드를 함께 끌고 간다.
     function isContainer(n) { return !!n && (n.type === 'group' || n.type === 'artboard'); }
+
+    // ───────── 그룹 소속 (명시적 저장: 노드의 .group = 직속 그룹 id) ─────────
+    // 그룹을 만들 때 지정한 노드만 멤버다. 프레임 안에 우연히 들어온 무관한 노드는 멤버가 아니다(함께 움직이지 않음).
+    function rectHas(r, p) { return p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h; }
+    // n의 직속 부모 그룹(없거나 사라졌으면 null)
+    function groupOf(n) { var g = (n && n.group) ? nodeById(n.group) : null; return (g && g.type === 'group') ? g : null; }
+    // n이 속한 최상위 그룹(중첩의 바깥). 없으면 null.
+    function topGroupOf(n) {
+        var g = groupOf(n); if (!g) return null;
+        var seen = {};
+        while (true) { if (seen[g.id]) break; seen[g.id] = true; var up = groupOf(g); if (!up) break; g = up; }
+        return g;
+    }
+    // n이 group의 자손인가 — .group 사슬을 타고 올라가며 확인
+    function isDescendant(n, group) {
+        var cur = groupOf(n), seen = {};
+        while (cur) { if (cur === group) return true; if (seen[cur.id]) break; seen[cur.id] = true; cur = groupOf(cur); }
+        return false;
+    }
+    // n이 container 안에 있는가 — 그룹은 소유 사슬, 아트보드는 기하학적 내포
+    function inContainer(n, cont) {
+        if (!cont) return false;
+        if (cont.type === 'group') return isDescendant(n, cont);
+        return rectHas(nodeRect(cont), groupMemberPoint(n));
+    }
+    // 현재 맥락(stop=격리 그룹, null=루트)에서 n을 클릭하면 선택되는 "단위"
+    //  - 루트: n이 속한 최상위 그룹(그룹 = 하나의 오브젝트). 그룹 없으면 n.
+    //  - 격리 G 안: G의 직속 자식(중첩 그룹이면 그 그룹, 아니면 n).
+    function unitWithin(n, stop) {
+        if (!stop) return topGroupOf(n) || n;
+        if (n === stop) return n;
+        var cur = n, seen = {};
+        while (cur) {
+            var o = groupOf(cur);
+            if (o === stop) return cur;          // cur = 격리 그룹의 직속 자식
+            if (!o || seen[cur.id]) break; seen[cur.id] = true;
+            cur = o;
+        }
+        return n;
+    }
+    function currentIso() {
+        while (isoPath.length) {                                   // 사라진 그룹(삭제·undo)은 스택에서 자동 정리
+            var g = nodeById(isoPath[isoPath.length - 1]);
+            if (g && g.type === 'group') return g;
+            isoPath.pop();
+        }
+        return null;
+    }
+    // 현재 맥락에서 n이 직접 편집(선택·리사이즈·연결) 대상인가 = 단위가 자기 자신
+    function editableInContext(n) {
+        var stop = currentIso();
+        if (!stop) return !topGroupOf(n);                 // 루트: 그룹 미소속 노드 + 최상위 그룹만
+        if (n.id === stop.id || !isDescendant(n, stop)) return false; // 격리 프레임·외부 노드 제외
+        return unitWithin(n, stop) === n;
+    }
+    // 선택 도구 여부(벡터 모듈의 직접/펜/도형 모드가 아니면 선택)
+    function selMode() { return !stage.classList.contains('mode-direct') && !stage.classList.contains('mode-pen') && !stage.classList.contains('mode-shape'); }
+    // 레거시 캔버스(그룹은 있는데 .group 미보유): 현재 위치 기준으로 멤버십을 1회 굳힌다(가장 안쪽 그룹이 소유).
+    function migrateGroupMembership() {
+        var groups = nodes.filter(function (n) { return n.type === 'group'; });
+        if (!groups.length) return;
+        if (nodes.some(function (n) { return n.group != null; })) return; // 이미 새 형식
+        nodes.forEach(function (n) {
+            var p = groupMemberPoint(n), best = null, bestA = Infinity;
+            groups.forEach(function (g) {
+                if (g === n) return;
+                var a = (g.width || 250) * (g.height || 60);
+                if (rectHas(nodeRect(g), p) && a < bestA) { bestA = a; best = g; }
+            });
+            if (best) n.group = best.id;
+        });
+    }
+
     // ───────── 접기/펼치기 (긴 텍스트 노드) ─────────
     function isFoldable(n) { return (!n.type || n.type === 'text') && (!!n.collapsed || (n.height || 60) >= FOLD_MIN); }
     function setFold(n, collapse) {
@@ -162,12 +237,21 @@
     // ───────── 렌더 ─────────
     function render() {
         nodesEl.innerHTML = '';
+        // 격리(그룹 안 편집) — 슬라이드쇼 중엔 비활성. 자손만 또렷, 나머지는 흐리게.
+        var isoNode = stage.classList.contains('is-presenting') ? null : currentIso();
+        isoMembers = null;
+        if (isoNode) { isoMembers = {}; collectGroupContents(isoNode, isoMembers); }
+        stage.classList.toggle('is-iso', !!isoNode);
         // 아트보드(맨 뒤) → 그룹 → 일반 노드 순으로 뒤에서 앞으로 쌓는다
         function zord(n) { return n.type === 'artboard' ? 0 : n.type === 'group' ? 1 : 2; }
         var ordered = nodes.slice().sort(function (a, b) { return zord(a) - zord(b); });
         ordered.forEach(function (n) {
             var d = document.createElement('div');
             d.className = 'cnode cnode--' + (n.type || 'text') + (selNodes[n.id] ? ' is-sel' : '') + (keyNode === n.id ? ' is-key' : '') + (n.locked ? ' is-locked' : '');
+            if (isoNode) {
+                if (n.id === isoNode.id) d.classList.add('cnode--isoframe');       // 격리 그룹 프레임 = 배경 경계
+                else if (!isoMembers[n.id]) d.classList.add('cnode--isodim');      // 그룹 밖 = 흐림·비활성
+            }
             d.style.left = n.x + 'px'; d.style.top = n.y + 'px';
             d.style.width = (n.width || 250) + 'px'; d.style.height = (n.height || 60) + 'px';
             var ext = n.type && extRenderers[n.type];
@@ -264,7 +348,7 @@
                 if (n.collapsed) d.classList.add('cnode--collapsed');
                 inner += '<button type="button" class="cnode__fold" title="접기/펼치기">' + (n.collapsed ? '▸' : '▾') + '</button>';
             }
-            if (admin && !n.locked) {
+            if (admin && !n.locked && editableInContext(n)) {   // 그룹 안 멤버는 핸들 숨김(그룹째 다룸) — 격리 진입 시에만 노출
                 if (n.type !== 'artboard') {   // 그룹도 연결점 표시(라인 연결 가능), 아트보드만 제외
                     inner += '<span class="chandle chandle--r" data-side="right"></span><span class="chandle chandle--l" data-side="left"></span>' +
                         '<span class="chandle chandle--t" data-side="top"></span><span class="chandle chandle--b" data-side="bottom"></span>';
@@ -288,6 +372,7 @@
         });
         renderEdges();
         updateInspector();
+        showIsoBar();
         if (activeVid) ytConnect();
     }
     // 재생 중인 iframe에 시간보고 요청(핸드셰이크) → message로 currentTime 수신해 저장
@@ -298,6 +383,7 @@
     }
     var ARROW_LEN = 13; // 화살촉 길이
     function renderEdges() {
+        var iso = stage.classList.contains('is-presenting') ? null : currentIso();
         var parts = '';
         edges.forEach(function (e) {
             var a = nodeById(e.fromNode), b = nodeById(e.toNode); if (!a || !b) return;
@@ -309,9 +395,12 @@
             // 끝 접선 단위벡터 → 라인은 화살촉 밑동(노치)에서 끝내고 화살촉이 마무리 (라인이 화살표 위에 얹히지 않게)
             var tx = p2.x - ctl.c2.x, ty = p2.y - ctl.c2.y, tl = Math.hypot(tx, ty) || 1, ux = tx / tl, uy = ty / tl;
             var pe = { x: p2.x - ux * (ARROW_LEN * 0.62), y: p2.y - uy * (ARROW_LEN * 0.62) };
-            parts += '<path d="M' + p1.x + ',' + p1.y + ' C' + ctl.c1.x + ',' + ctl.c1.y + ' ' + ctl.c2.x + ',' + ctl.c2.y + ' ' + pe.x + ',' + pe.y + '" fill="none" stroke="' + stroke + '" stroke-width="' + sw + '" data-id="' + e.id + '" class="cedge"/>';
-            parts += arrowMarkup(p2, ux, uy, stroke);
-            if (e.label) parts += '<text x="' + (p1.x + p2.x) / 2 + '" y="' + ((p1.y + p2.y) / 2 - 6) + '" class="celabel" text-anchor="middle">' + esc(e.label) + '</text>';
+            var seg = '<path d="M' + p1.x + ',' + p1.y + ' C' + ctl.c1.x + ',' + ctl.c1.y + ' ' + ctl.c2.x + ',' + ctl.c2.y + ' ' + pe.x + ',' + pe.y + '" fill="none" stroke="' + stroke + '" stroke-width="' + sw + '" data-id="' + e.id + '" class="cedge"/>';
+            seg += arrowMarkup(p2, ux, uy, stroke);
+            if (e.label) seg += '<text x="' + (p1.x + p2.x) / 2 + '" y="' + ((p1.y + p2.y) / 2 - 6) + '" class="celabel" text-anchor="middle">' + esc(e.label) + '</text>';
+            // 격리 중: 그룹 안끼리 잇는 선만 또렷, 나머지는 흐리게
+            if (iso && isoMembers && !(isoMembers[e.fromNode] && isoMembers[e.toNode])) parts += '<g opacity="0.15">' + seg + '</g>';
+            else parts += seg;
         });
         svg.innerHTML = parts;
     }
@@ -405,6 +494,12 @@
         if (activeVid) { activeVid = null; render(); }  // 빈 곳 클릭 = 영상 닫기 (PDF는 열어둔 채 유지, 바의 ✕로 접음)
         if (!admin || spaceDown || ev.button === 1) startPan(ev); else marquee(ev);
     });
+    // 빈 곳 더블클릭 = 격리(그룹 안 편집) 한 단계 나가기 (흐려진 외부 노드·프레임은 pointer-events:none이라 여기로 떨어진다)
+    stage.addEventListener('dblclick', function (ev) {
+        if (!admin || stage.classList.contains('is-presenting')) return;
+        if (ev.target.closest('.cnode')) return;   // 노드 위 더블클릭은 nodesEl 핸들러가 처리
+        if (isoPath.length) { ev.preventDefault(); exitIso(false); }
+    });
     // 드래그 중 커서가 iframe(PDF·유튜브) 위를 지나면 iframe이 mouseup을 삼켜 드래그가 안 풀린다 → 차단
     stage.addEventListener('mousedown', function () { stage.classList.add('is-interacting'); }, true);
     document.addEventListener('mouseup', function () { stage.classList.remove('is-interacting'); }, true);
@@ -493,7 +588,12 @@
             var w1 = screenToWorld(e.clientX, e.clientY);
             var rect = { x: Math.min(w0.x, w1.x), y: Math.min(w0.y, w1.y), w: Math.abs(w1.x - w0.x), h: Math.abs(w1.y - w0.y) };
             if (rect.w < 4 && rect.h < 4) return;
-            nodes.forEach(function (n) { if (!isContainer(n) && rectsHit(nodeRect(n), rect)) selNodes[n.id] = true; });
+            var stop = currentIso();
+            nodes.forEach(function (n) {
+                if (isContainer(n) || !rectsHit(nodeRect(n), rect)) return;
+                if (stop && !(isoMembers && isoMembers[n.id])) return;   // 격리 중엔 그룹 내부만
+                var u = unitWithin(n, stop); if (u) selNodes[u.id] = true;   // 멤버 → 그룹 단위로 선택
+            });
             refreshSel();
         }
         document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
@@ -523,23 +623,39 @@
         if (!n.locked && ev.target.closest('.chandle')) { ev.stopPropagation(); startConnect(n, ev.target.closest('.chandle').dataset.side, ev); return; }
         if (!n.locked && ev.target.closest('.cres')) { ev.stopPropagation(); startResize(n, ev, ev.target.closest('.cres').dataset.dir); return; }
         if (ev.target.closest('a')) return;
-        if (ev.shiftKey) { if (selNodes[n.id]) delete selNodes[n.id]; else selNodes[n.id] = true; selEdges = {}; refreshSel(); return; }
-        if (!selNodes[n.id]) { selNodes = {}; selEdges = {}; selNodes[n.id] = true; refreshSel(); }
+        // 그룹 = 하나의 오브젝트: 클릭한 노드 대신 "단위"(루트=최상위 그룹 / 격리=그 그룹의 직속 자식)를 다룬다
+        var unit = selMode() ? unitWithin(n, currentIso()) : n;
+        if (ev.shiftKey) { if (selNodes[unit.id]) delete selNodes[unit.id]; else selNodes[unit.id] = true; selEdges = {}; refreshSel(); return; }
+        if (!selNodes[unit.id]) { selNodes = {}; selEdges = {}; selNodes[unit.id] = true; refreshSel(); }
         ev.stopPropagation();
-        if (n.locked) return;                                   // 잠긴 노드: 선택만, 이동 불가
-        if (ev.altKey) { startDuplicateDrag(n, ev); return; }   // Alt+드래그 = 복제
-        startDrag(n, ev);
+        if (unit.locked) return;                                   // 잠긴 노드/그룹: 선택만, 이동 불가
+        if (ev.altKey) { startDuplicateDrag(unit, ev); return; }    // Alt+드래그 = 복제
+        startDrag(unit, ev);
     });
     nodesEl.addEventListener('dblclick', function (ev) {
         if (stage.classList.contains('is-presenting')) return;
         var nodeEl = ev.target.closest('.cnode'); if (!nodeEl) return;
+        if (ev.target.closest('.cnode__edit, .cnode__editline')) return;  // 이미 편집 중: 더블클릭=단어 선택(네이티브), 에디터 재생성 X
         if (!admin) { enableViewerCopy(nodeEl); return; }
         var n = nodeById(nodeEl.dataset.id); if (!n) return;
         if (n.locked) return;                                   // 잠긴 노드: 편집 불가
-        if (n.type === 'group') editGroupLabel(n, nodeEl);
-        else if (n.type === 'artboard') editArtboardName(n, nodeEl);
-        else if (n.type === 'link') editLink(n, nodeEl);
-        else if (!n.type || n.type === 'text') editText(n, nodeEl);
+        if (!selMode()) {                                       // 벡터(직접·펜·도형) 모드: 기존 편집 동작 유지
+            if (n.type === 'group') editGroupLabel(n, nodeEl);
+            else if (n.type === 'artboard') editArtboardName(n, nodeEl);
+            else if (n.type === 'link') editLink(n, nodeEl);
+            else if (!n.type || n.type === 'text') editText(n, nodeEl);
+            return;
+        }
+        // 처리한 더블클릭은 전파를 멈춘다(크롭 모듈이 stage에서 중복 처리하지 않도록). 이미지 leaf만 버블 허용 → 크롭.
+        // 그룹 라벨 텍스트 더블클릭 = 이름 변경 (격리 진입보다 우선)
+        if (n.type === 'group' && ev.target.closest('.cnode__grouplabel')) { ev.stopPropagation(); editGroupLabel(n, nodeEl); return; }
+        // 더블클릭 = 한 단계 안으로 (단위가 그룹이면 그 그룹 격리 진입)
+        var unit = unitWithin(n, currentIso());
+        if (unit && unit.type === 'group') { ev.stopPropagation(); enterIso(unit); return; }
+        // 단위가 잎(leaf): 현재 맥락에서 바로 편집. 이미지·파일은 그냥 둬서 크롭 모듈(stage dblclick)이 처리.
+        if (n.type === 'artboard') { ev.stopPropagation(); editArtboardName(n, nodeEl); }
+        else if (n.type === 'link') { ev.stopPropagation(); editLink(n, nodeEl); }
+        else if (!n.type || n.type === 'text') { ev.stopPropagation(); editText(n, nodeEl); }
     });
     svg.addEventListener('mousedown', function (ev) { var p = ev.target.closest('.cedge'); if (p) { ev.stopPropagation(); selectEdge(p.dataset.id, ev.shiftKey); } });
 
@@ -584,10 +700,15 @@
     function setConnectHot(id) {
         nodesEl.querySelectorAll('.cnode').forEach(function (el) { el.classList.toggle('is-connect-hot', !!id && el.dataset.id === id); });
     }
-    function collectGroupContents(group, out) {
-        var gr = nodeRect(group);
+    function collectGroupContents(container, out) {
+        if (container.type === 'group') {
+            // 소유 사슬 기반 — 이 그룹의 자손만(겹치는 옆 그룹의 노드는 제외). 중첩은 isDescendant가 모두 포함.
+            nodes.forEach(function (o) { if (o !== container && !out[o.id] && isDescendant(o, container)) out[o.id] = o; });
+            return;
+        }
+        var gr = nodeRect(container);   // 아트보드: 기하학적 내포 + 재귀
         nodes.forEach(function (o) {
-            if (o === group || out[o.id]) return;
+            if (o === container || out[o.id]) return;
             var c = groupMemberPoint(o);
             if (c.x > gr.x && c.x < gr.x + gr.w && c.y > gr.y && c.y < gr.y + gr.h) {
                 out[o.id] = o;
@@ -605,18 +726,10 @@
         if (inside) Object.keys(inside).forEach(function (id) { moveNodeCascade(inside[id], dx, dy, moved); });
     }
     function startDrag(n, ev) {
-        var movers = selNodes[n.id] ? selList() : [n];
-        for (var gi = 0; gi < movers.length; gi++) {
-            var m = movers[gi];
-            if (isContainer(m)) {
-                var gr = nodeRect(m);
-                nodes.forEach(function (o) {
-                    if (o === m || movers.indexOf(o) >= 0) return;
-                    var c = groupMemberPoint(o);
-                    if (c.x > gr.x && c.x < gr.x + gr.w && c.y > gr.y && c.y < gr.y + gr.h) movers.push(o);
-                });
-            }
-        }
+        var base = selNodes[n.id] ? selList() : [n];
+        var set = {};
+        base.forEach(function (m) { set[m.id] = m; if (isContainer(m)) collectGroupContents(m, set); });
+        var movers = Object.keys(set).map(function (id) { return set[id]; });
         movers = movers.filter(function (m) { return !m.locked; }); // 잠긴 노드는 따라 움직이지 않음
         if (!movers.length) return;
         var single = (movers.length === 1 && !isContainer(movers[0])) ? movers[0] : null;
@@ -667,11 +780,12 @@
         var src = Object.keys(full).map(function (id) { return full[id]; });
         var idMap = {}, clones = [];
         src.forEach(function (m) { var c = clone(m); idMap[m.id] = uid('n'); c.id = idMap[m.id]; delete c.locked; clones.push(c); });
+        clones.forEach(function (c) { if (c.group && idMap[c.group]) c.group = idMap[c.group]; }); // 그룹 소속 재매핑(복제에 포함된 그룹만; 부모 미포함이면 같은 그룹 유지)
         clones.forEach(function (c) { nodes.push(c); });
         edges.filter(function (ed) { return idMap[ed.fromNode] && idMap[ed.toNode]; }).forEach(function (ed) {
             var ee = Object.assign({}, ed); ee.id = uid('e'); ee.fromNode = idMap[ed.fromNode]; ee.toNode = idMap[ed.toNode]; edges.push(ee);
         });
-        selNodes = {}; clones.forEach(function (c) { selNodes[c.id] = true; }); keyNode = null; selEdges = {};
+        selNodes = {}; base.forEach(function (m) { if (idMap[m.id]) selNodes[idMap[m.id]] = true; }); keyNode = null; selEdges = {}; // 최상위 단위만 선택
         markDirty(); render();
         var target = nodeById(idMap[n.id]);
         if (target) startDrag(target, ev);
@@ -687,8 +801,7 @@
             var rest = list.filter(function (n) { return n !== cont; });
             var insiders = rest.filter(function (n) {
                 if (isContainer(n)) return false;
-                var c = groupMemberPoint(n);
-                return c.x > gr0.x && c.x < gr0.x + gr0.w && c.y > gr0.y && c.y < gr0.y + gr0.h;
+                return inContainer(n, cont);
             });
             if (rest.length === 0) { alignWithinContainer(cont, mode); return; }            // 컨테이너만 = 전체 자식 정렬
             if (insiders.length === rest.length) { alignNodesToFrame(insiders, gr0, mode); return; } // 컨테이너 + 그 안 노드만 = 선택한 자식을 프레임 기준 정렬
@@ -698,11 +811,7 @@
         var selGroups = containers;
         var units = list.filter(function (n) {
             if (isContainer(n)) return true;
-            var c = groupMemberPoint(n);
-            for (var i = 0; i < selGroups.length; i++) {
-                var gr = nodeRect(selGroups[i]);
-                if (c.x > gr.x && c.x < gr.x + gr.w && c.y > gr.y && c.y < gr.y + gr.h) return false;
-            }
+            for (var i = 0; i < selGroups.length; i++) { if (inContainer(n, selGroups[i])) return false; }
             return true;
         });
         if (units.length < 2) { toast('2개 이상 선택하세요'); return; }
@@ -956,6 +1065,7 @@
         if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'f' || e.key === 'F') && Object.keys(selNodes).length) { e.preventDefault(); foldSelection(); return; }
         if (!admin) return;
         if (e.key === 'Escape' && eyedrop) { e.preventDefault(); setEyedrop(false); toast('스포이드 취소'); return; }
+        if (e.key === 'Escape' && isoPath.length) { e.preventDefault(); exitIso(false); return; }
         if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); startEyedrop(); return; }
         // 글자 서식: 노드 선택 상태에서 Ctrl+B/U, Ctrl+Shift+S (편집 중엔 textarea가 따로 처리). preventDefault로 브라우저 기본(소스보기 등) 차단.
         if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'b' || e.key === 'B') && Object.keys(selNodes).length) { e.preventDefault(); applyFormat('bold'); return; }
@@ -1009,10 +1119,18 @@
     function delSelection() {
         if (Object.keys(selEdges).length) { edges = edges.filter(function (x) { return !selEdges[x.id]; }); selEdges = {}; }
         var ids = {};
-        selList().forEach(function (n) { if (!n.locked) ids[n.id] = true; }); // 잠긴 노드는 삭제 보호
+        selList().forEach(function (n) {
+            if (n.locked) return;                              // 잠긴 노드는 삭제 보호
+            ids[n.id] = true;
+            if (n.type === 'group') {                          // 그룹 = 한 덩어리: 멤버도 함께 삭제(잠긴 멤버는 보호)
+                var set = {}; collectGroupContents(n, set);
+                Object.keys(set).forEach(function (id) { var m = nodeById(id); if (m && !m.locked) ids[id] = true; });
+            }
+        });
         if (Object.keys(ids).length) {
             nodes = nodes.filter(function (n) { return !ids[n.id]; });
             edges = edges.filter(function (ed) { return !ids[ed.fromNode] && !ids[ed.toNode]; });
+            nodes.forEach(function (n) { if (n.group && ids[n.group]) delete n.group; }); // 삭제된 그룹 참조 정리
             Object.keys(ids).forEach(function (id) { delete selNodes[id]; });
         }
         if (activeVid && !nodeById(activeVid)) activeVid = null;
@@ -1058,14 +1176,51 @@
         list.forEach(function (n) { var r = nodeRect(n); minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); });
         var pad = 24;
         var gid = uid('g');
-        nodes.push({ id: gid, type: 'group', label: '그룹', x: minX - pad, y: minY - pad - 18, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 + 18 });
+        // 새 그룹의 부모 = 선택한 것들의 공통 부모(모두 같은 그룹 안이면 그 그룹, 아니면 없음 = 최상위)
+        var pset = {}; list.forEach(function (n) { pset[n.group || ''] = true; });
+        var parentId = (Object.keys(pset).length === 1) ? (list[0].group || null) : null;
+        var grp = { id: gid, type: 'group', label: '그룹', x: minX - pad, y: minY - pad - 18, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 + 18 };
+        if (parentId) grp.group = parentId;
+        nodes.push(grp);
+        list.forEach(function (n) { n.group = gid; });        // 지정한 것들만 멤버로 명시 저장
         selNodes = {}; selNodes[gid] = true; selEdges = {};  // 그룹 선택 → Ctrl+G 다시 누르면 해제
         markDirty(); render();
     }
     function ungroupSelection() {
         var removed = false;
-        selList().forEach(function (n) { if (n.type === 'group') { nodes = nodes.filter(function (x) { return x.id !== n.id; }); delete selNodes[n.id]; removed = true; } });
+        selList().forEach(function (g) {
+            if (g.type !== 'group') return;
+            var parent = g.group || null;                     // 해제 시 자식은 부모 그룹으로 한 단계 올라간다(없으면 그룹 밖)
+            nodes.forEach(function (n) { if (n.group === g.id) { if (parent) n.group = parent; else delete n.group; } });
+            nodes = nodes.filter(function (x) { return x.id !== g.id; });
+            delete selNodes[g.id];
+            removed = true;
+        });
         if (removed) { markDirty(); render(); } else { toast('해제할 그룹을 선택하세요'); }
+    }
+
+    // ───────── 격리(그룹 안 편집) 모드 ─────────
+    function enterIso(group) {
+        if (!admin || !group || group.type !== 'group') return;
+        isoPath.push(group.id);
+        clearSel(); render();
+        toast('그룹 편집 — 빈 곳을 더블클릭(또는 Esc)하면 나갑니다');
+    }
+    function exitIso(all) {
+        if (!isoPath.length) return;
+        if (all) isoPath = []; else isoPath.pop();
+        clearSel(); render();
+    }
+    var isoBar = null;
+    function showIsoBar() {
+        var cur = currentIso();
+        if (!cur || stage.classList.contains('is-presenting')) { if (isoBar) { isoBar.remove(); isoBar = null; } return; }
+        if (!isoBar) { isoBar = document.createElement('div'); isoBar.className = 'canvas-isobar'; stage.appendChild(isoBar); }
+        var names = isoPath.map(function (id) { var g = nodeById(id); return (g && g.label) || '그룹'; }).join(' › ');
+        isoBar.innerHTML = '<span class="canvas-isobar__path">📂 ' + esc(names) + '</span>' +
+            '<span class="canvas-isobar__hint">빈 곳 더블클릭 = 나가기</span>' +
+            '<button type="button" class="canvas-isobar__exit" title="그룹 밖으로 (Esc)">✕</button>';
+        isoBar.querySelector('.canvas-isobar__exit').onclick = function () { exitIso(true); };
     }
 
     // ───────── 추가/맞춤/저장/입출력 ─────────
@@ -1078,7 +1233,10 @@
             var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
             added.forEach(function (n) { var w = n.width || 250, h = n.height || 60; minX = Math.min(minX, n.x || 0); minY = Math.min(minY, n.y || 0); maxX = Math.max(maxX, (n.x || 0) + w); maxY = Math.max(maxY, (n.y || 0) + h); });
             var c = centerWorld(), ox = c.x - (minX + maxX) / 2, oy = c.y - (minY + maxY) / 2;
-            added.forEach(function (n) { n.x = Math.round((n.x || 0) + ox); n.y = Math.round((n.y || 0) + oy); nodes.push(n); });
+            added.forEach(function (n) {
+                if (n.group) { if (idMap[n.group]) n.group = idMap[n.group]; else delete n.group; } // 그룹 소속 재매핑(포함 안 된 그룹 참조는 제거)
+                n.x = Math.round((n.x || 0) + ox); n.y = Math.round((n.y || 0) + oy); nodes.push(n);
+            });
         }
         (srcEdges || []).forEach(function (ed) { if (idMap[ed.fromNode] && idMap[ed.toNode]) { var ee = Object.assign({}, ed); ee.id = uid('e'); ee.fromNode = idMap[ed.fromNode]; ee.toNode = idMap[ed.toNode]; edges.push(ee); } });
         markDirty(); render();
@@ -1086,9 +1244,11 @@
     function selectionGraph() {
         var list = selList();
         if (!list.length) return null;
-        var ids = {};
-        list.forEach(function (n) { ids[n.id] = true; });
-        return { nodes: clone(list), edges: clone(edges.filter(function (ed) { return ids[ed.fromNode] && ids[ed.toNode]; })) };
+        var set = {};   // 그룹을 복사/잘라내면 그 멤버도 함께(명시적 멤버십)
+        list.forEach(function (n) { set[n.id] = n; if (isContainer(n)) collectGroupContents(n, set); });
+        var full = Object.keys(set).map(function (id) { return set[id]; });
+        var ids = {}; full.forEach(function (n) { ids[n.id] = true; });
+        return { nodes: clone(full), edges: clone(edges.filter(function (ed) { return ids[ed.fromNode] && ids[ed.toNode]; })) };
     }
     function copySelection(e) {
         var graph = selectionGraph();
@@ -1294,6 +1454,8 @@
         }
         nodes = body.nodes || [];
         edges = body.edges || [];
+        migrateGroupMembership();   // 연 문서가 레거시(.group 없음)면 멤버십 1회 확정
+        isoPath = [];               // 새 문서 = 격리 해제
         clearSel();
         dirty = false;
         render();
@@ -1509,7 +1671,7 @@
                 ['직접선택 정렬', '여러 박스 모서리(또는 패스 앵커)를 드래그 선택 후 정렬키 = 그 변만 정렬']
             ] },
             { t: '노드 편집', items: [
-                ['더블클릭', '카드·링크·그룹·아트보드 이름 편집'],
+                ['더블클릭', '카드·링크 편집 / 아트보드 이름 / 그룹은 안으로 진입(격리)'],
                 ['Alt + 드래그', '선택 노드 복제 (그 자리에 사본이 따라옴)'],
                 ['Shift + 크기조절', '비율 유지 · 회전핸들 + Shift = 15° 스냅'],
                 ['코너 라운드', '노드 선택 후 좌상단 주황 점 드래그'],
@@ -1520,6 +1682,10 @@
             ] },
             { t: '그룹 · 잠금', items: [
                 ['G / Ctrl+G', '그룹 / 그룹 해제'],
+                ['그룹 이동', '그룹 만들 때 지정한 멤버만 하나처럼 이동 (프레임에 우연히 겹친 다른 노드는 안 따라옴)'],
+                ['그룹 더블클릭', '그룹 안 편집(격리) — 바깥은 흐려지고 그룹 안 오브젝트만 편집'],
+                ['빈 곳 더블클릭 / Esc', '격리에서 한 단계 나가기 (상단 바의 ✕ = 완전히 나가기)'],
+                ['그룹 이름 변경', '그룹 라벨 글자를 더블클릭'],
                 ['그룹 이름 정렬', '그룹 선택 후 인스펙터 글자 정렬 (좌/중/우)'],
                 ['직접선택(A)', '그룹 모서리를 드래그 선택해 프레임 리사이즈'],
                 ['Shift+2', '잠금 / 한 번 더 누르면 해제 (잠긴 노드는 이동·편집·삭제 불가)'],
@@ -1618,6 +1784,7 @@
         selectOne: selectOne, clearSel: clearSel, selList: selList, nodeById: nodeById,
         selectEdge: selectEdge, selectEdges: selectEdges, edgesInRect: edgesInRect,
         uid: uid, esc: esc, cssEsc: cssEsc, toast: toast, nodeRect: nodeRect,
+        directlyEditable: editableInContext,   // 현재 맥락(격리)에서 노드를 바로 편집(크롭 등)할 수 있는가
         themeColor: themeColor, applyFormat: applyFormat,
         alignSel: alignSel,
         setAlignInterceptor: function (fn) { alignInterceptor = fn; },
@@ -1626,5 +1793,7 @@
         inspectorEl: function () { if (!inspector) buildInspector(); return inspector; }
     };
 
+    migrateGroupMembership();                 // 레거시 캔버스 멤버십 1회 확정
+    present = snapState(); past = []; future = []; // 마이그레이션은 undo 대상이 아님 → 기준선 재설정
     render(); fit();
 })();
