@@ -490,21 +490,8 @@
     }
 
     // ───────── 레이어 순서 ─────────
-    function reorder(kind) {
-        var sel = C.selNodes, ns = C.nodes;
-        var picked = ns.filter(function (n) { return sel[n.id]; });
-        if (!picked.length) { C.toast('순서를 바꿀 노드를 선택하세요'); return; }
-        var arr;
-        if (kind === 'front') arr = ns.filter(function (n) { return !sel[n.id]; }).concat(picked);
-        else if (kind === 'back') arr = picked.concat(ns.filter(function (n) { return !sel[n.id]; }));
-        else {
-            arr = ns.slice();
-            if (kind === 'fwd') { for (var i = arr.length - 2; i >= 0; i--) if (sel[arr[i].id] && !sel[arr[i + 1].id]) { var t = arr[i]; arr[i] = arr[i + 1]; arr[i + 1] = t; } }
-            else { for (var j = 1; j < arr.length; j++) if (sel[arr[j].id] && !sel[arr[j - 1].id]) { var t2 = arr[j]; arr[j] = arr[j - 1]; arr[j - 1] = t2; } }
-        }
-        C.nodes = arr;
-        C.markDirty(); C.render();
-    }
+    // 코어(app.js)의 계층 인식 reorder에 위임 — 그룹은 자손까지 한 블록으로 함께 이동.
+    function reorder(kind) { C.reorder(kind); }
 
     // ───────── 직접 선택 (앵커 편집) ─────────
     // node/sel = 활성 패스의 앵커 핸들 편집용, cps = 오브젝트 횡단 제어점 선택집합(키 = id|kind)

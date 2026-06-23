@@ -1,6 +1,6 @@
 [package]
 name = "ice-canvas"
-version = "0.2.5"
+version = "0.2.6"
 description = "ICE Canvas"
 authors = ["ICE Canvas"]
 edition = "2021"

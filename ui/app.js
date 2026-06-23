@@ -209,6 +209,28 @@
         });
     }
 
+    // ───────── z-order(레이어) — 계층적 ─────────
+    // 렌더 순서(뒤→앞): 아트보드(배경) → 최상위 단위(배열 순서 = z순서).
+    // 그룹은 프레임을 먼저 그린 뒤(=배경) 그 자손을 이어 그린다 → 프레임이 항상 멤버 뒤, 서브트리는 연속.
+    // 평면적 zord 정렬과 달리 reorder(앞으로/뒤로)가 그룹째 먹힌다. 비파괴(배열을 바꾸지 않음).
+    function renderOrder() {
+        var childrenOf = {}, roots = [], boards = [];
+        nodes.forEach(function (n) {
+            if (n.type === 'artboard') { boards.push(n); return; }
+            var g = groupOf(n);
+            if (g) (childrenOf[g.id] || (childrenOf[g.id] = [])).push(n);
+            else roots.push(n);
+        });
+        var out = [], seen = {};
+        function emit(n) { if (seen[n.id]) return; seen[n.id] = true; out.push(n); if (n.type === 'group') { var ch = childrenOf[n.id]; if (ch) ch.forEach(emit); } }
+        boards.forEach(function (b) { if (!seen[b.id]) { seen[b.id] = true; out.push(b); } });
+        roots.forEach(emit);
+        nodes.forEach(function (n) { if (!seen[n.id]) { seen[n.id] = true; out.push(n); } }); // 사이클 등 누락 보존
+        return out;
+    }
+    // 배열을 렌더 순서(계층 연속)로 굳힌다 — reorder가 형제 블록을 안전하게 옮길 수 있도록
+    function normalizeOrder() { nodes = renderOrder(); }
+
     // ───────── 접기/펼치기 (긴 텍스트 노드) ─────────
     function isFoldable(n) { return (!n.type || n.type === 'text') && (!!n.collapsed || (n.height || 60) >= FOLD_MIN); }
     function setFold(n, collapse) {
@@ -242,9 +264,8 @@
         isoMembers = null;
         if (isoNode) { isoMembers = {}; collectGroupContents(isoNode, isoMembers); }
         stage.classList.toggle('is-iso', !!isoNode);
-        // 아트보드(맨 뒤) → 그룹 → 일반 노드 순으로 뒤에서 앞으로 쌓는다
-        function zord(n) { return n.type === 'artboard' ? 0 : n.type === 'group' ? 1 : 2; }
-        var ordered = nodes.slice().sort(function (a, b) { return zord(a) - zord(b); });
+        // 뒤→앞 쌓기 = 계층적 z-order(renderOrder): 아트보드 배경 → 최상위 단위(배열=z순) → 그룹 프레임 뒤에 자손
+        var ordered = renderOrder();
         ordered.forEach(function (n) {
             var d = document.createElement('div');
             d.className = 'cnode cnode--' + (n.type || 'text') + (selNodes[n.id] ? ' is-sel' : '') + (keyNode === n.id ? ' is-key' : '') + (n.locked ? ' is-locked' : '');
@@ -1077,9 +1098,10 @@
         if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) { e.preventDefault(); save(); return; }
         if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) { e.preventDefault(); fitContent(); return; }
         if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) { if (selectionGraph()) { e.preventDefault(); if (!document.execCommand || !document.execCommand('copy')) copySelection(); } return; }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'x' || e.key === 'X')) { if (selectionGraph()) { e.preventDefault(); cutSelection(); } return; }
         if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); selNodes = {}; selEdges = {}; nodes.forEach(function (n) { selNodes[n.id] = true; }); refreshSel(); return; }
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); if (selList().some(function (n) { return n.type === 'group'; })) ungroupSelection(); else groupSelection(); return; }
-        if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); if (selList().some(function (n) { return n.type === 'group'; })) ungroupSelection(); else groupSelection(); return; }
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); toggleGroup(); return; }
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); toggleGroup(); return; }
         if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyN') { e.preventDefault(); addNode('text'); return; }
         if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyL') { e.preventDefault(); addNode('link'); return; }
         if (e.key === 'Delete' || e.key === 'Backspace') { delSelection(); e.preventDefault(); }
@@ -1183,7 +1205,7 @@
         if (parentId) grp.group = parentId;
         nodes.push(grp);
         list.forEach(function (n) { n.group = gid; });        // 지정한 것들만 멤버로 명시 저장
-        selNodes = {}; selNodes[gid] = true; selEdges = {};  // 그룹 선택 → Ctrl+G 다시 누르면 해제
+        selNodes = {}; selNodes[gid] = true; selEdges = {};  // 새 그룹만 선택 → G 다시 누르면 해제(단일 그룹 토글)
         markDirty(); render();
     }
     function ungroupSelection() {
@@ -1197,6 +1219,44 @@
             removed = true;
         });
         if (removed) { markDirty(); render(); } else { toast('해제할 그룹을 선택하세요'); }
+    }
+    // G / Ctrl+G 토글: 단일 그룹만 선택 = 해제, 그 외(그룹+노드, 여러 단위, 일반 노드들) = 묶기(중첩 포함).
+    // ⚠ 예전엔 "선택에 그룹이 하나라도 있으면 해제"였는데, 그래서 [기존 그룹 + 노드]를 묶으려 하면 기존 그룹이 풀려버렸다.
+    function toggleGroup() {
+        var list = selList();
+        if (list.length === 1 && list[0].type === 'group') ungroupSelection();
+        else groupSelection();
+    }
+
+    // ───────── 레이어 순서(reorder) — 계층 인식 ─────────
+    // 선택 단위(그룹이면 프레임)를 같은 부모 컨텍스트의 형제들 사이에서 옮긴다. 그룹은 자손까지 한 블록으로 함께 이동.
+    // 형제 새 순서대로 각 블록을 제자리(원래 차지하던 슬롯)에 다시 채워, 다른 컨텍스트 노드·아트보드 위치는 보존.
+    function applySiblingOrder(order) {
+        function blockOf(n) { var s = {}; s[n.id] = n; if (isContainer(n)) collectGroupContents(n, s); return nodes.filter(function (x) { return s[x.id]; }); }
+        var flat = []; order.forEach(function (n) { blockOf(n).forEach(function (m) { flat.push(m); }); });
+        var moving = {}; flat.forEach(function (n) { moving[n.id] = true; });
+        var k = 0;
+        nodes = nodes.map(function (n) { return moving[n.id] ? flat[k++] : n; });
+    }
+    function reorder(kind) {
+        var picked = selList();
+        if (!picked.length) { toast('순서를 바꿀 노드를 선택하세요'); return; }
+        // 조상이 함께 선택된 단위는 제외(조상 블록이 끌고 감)
+        var tops = picked.filter(function (n) { return !picked.some(function (m) { return m !== n && isDescendant(n, m); }); });
+        // 같은 부모 컨텍스트만 대상(다르면 첫 단위 기준) — 형제끼리만 순서 비교가 의미 있음
+        var parent = groupOf(tops[0]), parentId = parent ? parent.id : null;
+        tops = tops.filter(function (n) { var g = groupOf(n); return (g ? g.id : null) === parentId; });
+        var sel = {}; tops.forEach(function (n) { sel[n.id] = true; });
+        normalizeOrder();                                  // 형제 블록을 배열에서 연속으로
+        var siblings = nodes.filter(function (n) { if (n.type === 'artboard') return false; var g = groupOf(n); return (g ? g.id : null) === parentId; });
+        var isSel = function (n) { return sel[n.id]; }, notSel = function (n) { return !sel[n.id]; };
+        var order = siblings.slice();
+        if (kind === 'front') order = siblings.filter(notSel).concat(siblings.filter(isSel));
+        else if (kind === 'back') order = siblings.filter(isSel).concat(siblings.filter(notSel));
+        else if (kind === 'fwd') { for (var i = order.length - 2; i >= 0; i--) if (sel[order[i].id] && !sel[order[i + 1].id]) { var t = order[i]; order[i] = order[i + 1]; order[i + 1] = t; } }
+        else { for (var j = 1; j < order.length; j++) if (sel[order[j].id] && !sel[order[j - 1].id]) { var t2 = order[j]; order[j] = order[j - 1]; order[j - 1] = t2; } }
+        applySiblingOrder(order);
+        markDirty(); render();
     }
 
     // ───────── 격리(그룹 안 편집) 모드 ─────────
@@ -1226,19 +1286,23 @@
     // ───────── 추가/맞춤/저장/입출력 ─────────
     function centerWorld() { var r = stage.getBoundingClientRect(); return screenToWorld(r.left + stage.clientWidth / 2, r.top + stage.clientHeight / 2); }
     // 노드+엣지를 id 재매핑하여 화면 중앙에 삽입 (붙여넣기용 — 화살표 연결 보존)
+    // 그룹 안 편집(격리) 중 붙여넣으면 클립보드 최상위 노드는 그 그룹의 멤버가 된다(.group = 격리 그룹).
     function insertGraph(srcNodes, srcEdges) {
-        var idMap = {}, added = [];
+        var idMap = {}, added = [], tops = [];
         (srcNodes || []).forEach(function (n) { var nn = clone(n); idMap[nn.id] = uid('n'); nn.id = idMap[nn.id]; added.push(nn); });
         if (added.length) {
             var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
             added.forEach(function (n) { var w = n.width || 250, h = n.height || 60; minX = Math.min(minX, n.x || 0); minY = Math.min(minY, n.y || 0); maxX = Math.max(maxX, (n.x || 0) + w); maxY = Math.max(maxY, (n.y || 0) + h); });
             var c = centerWorld(), ox = c.x - (minX + maxX) / 2, oy = c.y - (minY + maxY) / 2;
+            var iso = currentIso();
             added.forEach(function (n) {
-                if (n.group) { if (idMap[n.group]) n.group = idMap[n.group]; else delete n.group; } // 그룹 소속 재매핑(포함 안 된 그룹 참조는 제거)
+                if (n.group && idMap[n.group]) { n.group = idMap[n.group]; }   // 클립보드 내부 그룹 소속 유지(재매핑)
+                else { if (iso) n.group = iso.id; else delete n.group; tops.push(n); } // 클립보드 최상위 → 격리 그룹에 포함(없으면 루트)
                 n.x = Math.round((n.x || 0) + ox); n.y = Math.round((n.y || 0) + oy); nodes.push(n);
             });
         }
         (srcEdges || []).forEach(function (ed) { if (idMap[ed.fromNode] && idMap[ed.toNode]) { var ee = Object.assign({}, ed); ee.id = uid('e'); ee.fromNode = idMap[ed.fromNode]; ee.toNode = idMap[ed.toNode]; edges.push(ee); } });
+        if (tops.length) { selNodes = {}; selEdges = {}; keyNode = null; tops.forEach(function (n) { selNodes[n.id] = true; }); } // 붙여넣은 단위를 선택 → 바로 이동/그룹 가능
         markDirty(); render();
     }
     function selectionGraph() {
@@ -1268,6 +1332,16 @@
     function pasteGraph(graph) {
         if (!graph || !graph.nodes || !graph.nodes.length) return false;
         insertGraph(graph.nodes, graph.edges || []);
+        return true;
+    }
+    // 잘라내기 = 복사(클립보드 보관) 후 선택 삭제. 붙여넣기는 copySelection/paste 경로와 동일.
+    function cutSelection() {
+        var graph = selectionGraph(); if (!graph) return false;
+        canvasClipboard = graph;
+        var txt = JSON.stringify(graph);
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).catch(function () {});
+        delSelection();                                   // 내부에서 markDirty + render
+        toast('잘라냄 ' + graph.nodes.length + '개');
         return true;
     }
     function addNode(type) {
@@ -1380,7 +1454,7 @@
             else if (a === 'add-artboard') addArtboard();
             else if (a === 'lock-toggle') toggleLockSelection();
             else if (a === 'eyedrop') startEyedrop();
-            else if (a === 'group') { if (selList().some(function (n) { return n.type === 'group'; })) ungroupSelection(); else groupSelection(); }
+            else if (a === 'group') { toggleGroup(); }
             else if (a === 'fit') fit();
             else if (a === 'zoom-in') zoomBy(1.25);
             else if (a === 'zoom-out') zoomBy(1 / 1.25);
@@ -1645,6 +1719,7 @@
                 ['휠 / 스와이프', '스크롤 — Ctrl(⌘)+휠 = 확대/축소, +/− 도 가능'],
                 ['방향키', '선택 노드 이동(없으면 캔버스 이동), Shift = 크게'],
                 ['Ctrl+A / Delete', '전체 선택 / 선택 삭제'],
+                ['Ctrl+X / Ctrl+V', '잘라내기 / 붙여넣기 — 그룹 안 편집 중 붙여넣으면 그 그룹에 포함'],
                 ['Ctrl+Z / Ctrl+Shift+Z', '되돌리기 / 다시 실행'],
                 ['Ctrl+S', '저장'],
                 ['맞춤 버튼', '모든 내용이 보이도록 화면 맞춤']
@@ -1786,7 +1861,7 @@
         uid: uid, esc: esc, cssEsc: cssEsc, toast: toast, nodeRect: nodeRect,
         directlyEditable: editableInContext,   // 현재 맥락(격리)에서 노드를 바로 편집(크롭 등)할 수 있는가
         themeColor: themeColor, applyFormat: applyFormat,
-        alignSel: alignSel,
+        alignSel: alignSel, reorder: reorder,
         setAlignInterceptor: function (fn) { alignInterceptor = fn; },
         registerRenderer: function (t, fn) { extRenderers[t] = fn; },
         onRender: function (fn) { renderHooks.push(fn); },
