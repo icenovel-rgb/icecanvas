@@ -1285,6 +1285,24 @@
 
     // ───────── 추가/맞춤/저장/입출력 ─────────
     function centerWorld() { var r = stage.getBoundingClientRect(); return screenToWorld(r.left + stage.clientWidth / 2, r.top + stage.clientHeight / 2); }
+    // 그룹 프레임을 멤버(자손 전체)를 감싸도록 넓힌다(줄이진 않음 = 합집합). 부모 그룹으로 연쇄 — 자식이 커지면 부모도 함께.
+    // 붙여넣기로 그룹 밖에 멤버가 생겼을 때 "보이는 영역"이 멤버를 품도록. pad·라벨 여백은 그룹 생성과 동일(24 / 위 +18).
+    function growGroupToFit(g) {
+        var pad = 24, labelH = 18, seen = {};
+        while (g && g.type === 'group' && !seen[g.id]) {
+            seen[g.id] = true;
+            var kids = {}; collectGroupContents(g, kids);
+            var ids = Object.keys(kids);
+            if (ids.length) {
+                var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+                ids.forEach(function (id) { var r = nodeRect(kids[id]); minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); });
+                var nx = Math.min(g.x, minX - pad), ny = Math.min(g.y, minY - pad - labelH);
+                var nr = Math.max(g.x + (g.width || 250), maxX + pad), nb = Math.max(g.y + (g.height || 60), maxY + pad);
+                g.x = Math.round(nx); g.y = Math.round(ny); g.width = Math.round(nr - nx); g.height = Math.round(nb - ny);
+            }
+            g = groupOf(g);   // 상위 그룹도 같은 방식으로 — 방금 커진 자식 프레임까지 품도록
+        }
+    }
     // 노드+엣지를 id 재매핑하여 화면 중앙에 삽입 (붙여넣기용 — 화살표 연결 보존)
     // 그룹 안 편집(격리) 중 붙여넣으면 클립보드 최상위 노드는 그 그룹의 멤버가 된다(.group = 격리 그룹).
     function insertGraph(srcNodes, srcEdges) {
@@ -1300,6 +1318,7 @@
                 else { if (iso) n.group = iso.id; else delete n.group; tops.push(n); } // 클립보드 최상위 → 격리 그룹에 포함(없으면 루트)
                 n.x = Math.round((n.x || 0) + ox); n.y = Math.round((n.y || 0) + oy); nodes.push(n);
             });
+            if (iso && tops.length) growGroupToFit(iso);   // 붙여넣은 멤버가 프레임 밖이면 격리 그룹(+상위)을 넓힌다
         }
         (srcEdges || []).forEach(function (ed) { if (idMap[ed.fromNode] && idMap[ed.toNode]) { var ee = Object.assign({}, ed); ee.id = uid('e'); ee.fromNode = idMap[ed.fromNode]; ee.toNode = idMap[ed.toNode]; edges.push(ee); } });
         if (tops.length) { selNodes = {}; selEdges = {}; keyNode = null; tops.forEach(function (n) { selNodes[n.id] = true; }); } // 붙여넣은 단위를 선택 → 바로 이동/그룹 가능
