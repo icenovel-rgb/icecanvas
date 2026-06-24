@@ -264,6 +264,7 @@
         isoMembers = null;
         if (isoNode) { isoMembers = {}; collectGroupContents(isoNode, isoMembers); }
         stage.classList.toggle('is-iso', !!isoNode);
+        reflowGroups();   // 그리기 전에 그룹 프레임을 멤버에 맞춰 보정 — 모든 화면 갱신에서 "그룹⊇멤버, 부모⊇자식" 보장
         // 뒤→앞 쌓기 = 계층적 z-order(renderOrder): 아트보드 배경 → 최상위 단위(배열=z순) → 그룹 프레임 뒤에 자손
         var ordered = renderOrder();
         ordered.forEach(function (n) {
@@ -780,11 +781,12 @@
             } else {
                 orig.forEach(function (o) { o.m.x = o.x + ddx; o.m.y = o.y + ddy; var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(o.m.id) + '"]'); if (el) { el.style.left = o.m.x + 'px'; el.style.top = o.m.y + 'px'; } });
             }
+            reflowGroups(); syncGroupFrames();   // 멤버를 그룹 밖으로 끌면 프레임이 라이브로 따라 확장(부모 그룹까지)
             renderEdges(); drawGuides(gx, gy);
         }
         function up() {
             document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
-            if (moved) { renderEdges(); markDirty(); }
+            if (moved) { reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); }
             // 이동 없이 클릭 + 다중선택이면 이 노드를 정렬 기준(key object)으로 토글
             else if (admin && wasMulti) {
                 keyNode = (keyNode === n.id ? null : n.id); refreshSel();
@@ -918,7 +920,7 @@
             var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(n.id) + '"]'); if (el) { el.style.left = nx + 'px'; el.style.top = ny + 'px'; el.style.width = nw + 'px'; el.style.height = nh + 'px'; }
             renderEdges(); drawGuides(gx, gy);
         }
-        function up() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); renderEdges(); markDirty(); }
+        function up() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); }
         document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
     }
     function startConnect(from, side, ev) {
@@ -1285,23 +1287,32 @@
 
     // ───────── 추가/맞춤/저장/입출력 ─────────
     function centerWorld() { var r = stage.getBoundingClientRect(); return screenToWorld(r.left + stage.clientWidth / 2, r.top + stage.clientHeight / 2); }
-    // 그룹 프레임을 멤버(자손 전체)를 감싸도록 넓힌다(줄이진 않음 = 합집합). 부모 그룹으로 연쇄 — 자식이 커지면 부모도 함께.
-    // 붙여넣기로 그룹 밖에 멤버가 생겼을 때 "보이는 영역"이 멤버를 품도록. pad·라벨 여백은 그룹 생성과 동일(24 / 위 +18).
-    function growGroupToFit(g) {
-        var pad = 24, labelH = 18, seen = {};
-        while (g && g.type === 'group' && !seen[g.id]) {
-            seen[g.id] = true;
-            var kids = {}; collectGroupContents(g, kids);
-            var ids = Object.keys(kids);
-            if (ids.length) {
-                var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
-                ids.forEach(function (id) { var r = nodeRect(kids[id]); minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); });
-                var nx = Math.min(g.x, minX - pad), ny = Math.min(g.y, minY - pad - labelH);
-                var nr = Math.max(g.x + (g.width || 250), maxX + pad), nb = Math.max(g.y + (g.height || 60), maxY + pad);
-                g.x = Math.round(nx); g.y = Math.round(ny); g.width = Math.round(nr - nx); g.height = Math.round(nb - ny);
-            }
-            g = groupOf(g);   // 상위 그룹도 같은 방식으로 — 방금 커진 자식 프레임까지 품도록
-        }
+    // 모든 그룹 프레임을 멤버(자손 전체)를 감싸도록 넓힌다(grow-only=합집합, 줄이진 않음). 안쪽 그룹부터 처리 → 바깥이 방금 커진 자식 프레임까지 포함.
+    // "그룹은 언제나 멤버를, 부모는 언제나 자식을 시각적으로 포함"하는 불변식. 노드를 밖으로 옮기거나 붙여넣어도 프레임이 따라온다. render()·드래그·리사이즈·로드에서 호출.
+    function reflowGroups() {
+        var groups = nodes.filter(function (n) { return n.type === 'group'; });
+        if (!groups.length) return [];
+        function depth(g) { var d = 0, c = groupOf(g), s = {}; while (c && !s[c.id]) { s[c.id] = true; d++; c = groupOf(c); } return d; }
+        groups.sort(function (a, b) { return depth(b) - depth(a); });   // 깊은(안쪽) 그룹 먼저
+        var pad = 24, labelH = 18, changed = [];
+        groups.forEach(function (g) {
+            var kids = {}; collectGroupContents(g, kids); var ids = Object.keys(kids);
+            if (!ids.length) return;                                    // 빈 그룹은 그대로
+            var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+            ids.forEach(function (id) { var r = nodeRect(kids[id]); minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); });
+            var nx = Math.round(Math.min(g.x, minX - pad)), ny = Math.round(Math.min(g.y, minY - pad - labelH));
+            var nw = Math.round(Math.max(g.x + (g.width || 250), maxX + pad) - nx), nh = Math.round(Math.max(g.y + (g.height || 60), maxY + pad) - ny);
+            if (nx !== g.x || ny !== g.y || nw !== (g.width || 250) || nh !== (g.height || 60)) { g.x = nx; g.y = ny; g.width = nw; g.height = nh; changed.push(g.id); }
+        });
+        return changed;
+    }
+    // 그룹 프레임 DOM만 데이터에 맞춰 갱신(전체 재렌더 없이 — 드래그/리사이즈 중 라이브 확장용; 영상·iframe 리로드 방지)
+    function syncGroupFrames() {
+        nodes.forEach(function (n) {
+            if (n.type !== 'group') return;
+            var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(n.id) + '"]');
+            if (el) { el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; el.style.width = (n.width || 250) + 'px'; el.style.height = (n.height || 60) + 'px'; }
+        });
     }
     // 노드+엣지를 id 재매핑하여 화면 중앙에 삽입 (붙여넣기용 — 화살표 연결 보존)
     // 그룹 안 편집(격리) 중 붙여넣으면 클립보드 최상위 노드는 그 그룹의 멤버가 된다(.group = 격리 그룹).
@@ -1318,7 +1329,7 @@
                 else { if (iso) n.group = iso.id; else delete n.group; tops.push(n); } // 클립보드 최상위 → 격리 그룹에 포함(없으면 루트)
                 n.x = Math.round((n.x || 0) + ox); n.y = Math.round((n.y || 0) + oy); nodes.push(n);
             });
-            if (iso && tops.length) growGroupToFit(iso);   // 붙여넣은 멤버가 프레임 밖이면 격리 그룹(+상위)을 넓힌다
+            // 격리 그룹에 붙여넣어 멤버가 프레임 밖이면 → 아래 render()의 reflowGroups()가 그룹(+상위)을 감싸도록 넓힌다
         }
         (srcEdges || []).forEach(function (ed) { if (idMap[ed.fromNode] && idMap[ed.toNode]) { var ee = Object.assign({}, ed); ee.id = uid('e'); ee.fromNode = idMap[ed.fromNode]; ee.toNode = idMap[ed.toNode]; edges.push(ee); } });
         if (tops.length) { selNodes = {}; selEdges = {}; keyNode = null; tops.forEach(function (n) { selNodes[n.id] = true; }); } // 붙여넣은 단위를 선택 → 바로 이동/그룹 가능
@@ -1888,6 +1899,7 @@
     };
 
     migrateGroupMembership();                 // 레거시 캔버스 멤버십 1회 확정
-    present = snapState(); past = []; future = []; // 마이그레이션은 undo 대상이 아님 → 기준선 재설정
+    reflowGroups();                           // 로드 시 그룹 프레임을 멤버에 맞춰 1회 보정(언제나 포함 불변식)
+    present = snapState(); past = []; future = []; // 마이그레이션·보정은 undo 대상이 아님 → 기준선 재설정
     render(); fit();
 })();
