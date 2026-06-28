@@ -395,6 +395,7 @@
         renderEdges();
         updateInspector();
         showIsoBar();
+        updateSelOverlay();
         if (activeVid) ytConnect();
     }
     // 재생 중인 iframe에 시간보고 요청(핸드셰이크) → message로 currentTime 수신해 저장
@@ -450,7 +451,7 @@
     function refreshSel() {
         if (keyNode && !selNodes[keyNode]) keyNode = null; // 선택에서 빠진 기준 노드는 해제
         nodesEl.querySelectorAll('.cnode').forEach(function (el) { el.classList.toggle('is-sel', !!selNodes[el.dataset.id]); el.classList.toggle('is-key', keyNode === el.dataset.id); });
-        renderEdges(); updateInspector();
+        renderEdges(); updateInspector(); updateSelOverlay();
     }
     function selectOne(id, add) { if (!add) selNodes = {}; selEdges = {}; selNodes[id] = true; refreshSel(); }
     // 엣지(라인) 선택 — add=true면 토글(다중 선택), 아니면 단일
@@ -782,11 +783,11 @@
                 orig.forEach(function (o) { o.m.x = o.x + ddx; o.m.y = o.y + ddy; var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(o.m.id) + '"]'); if (el) { el.style.left = o.m.x + 'px'; el.style.top = o.m.y + 'px'; } });
             }
             reflowGroups(); syncGroupFrames();   // 멤버를 그룹 밖으로 끌면 프레임이 라이브로 따라 확장(부모 그룹까지)
-            renderEdges(); drawGuides(gx, gy);
+            renderEdges(); drawGuides(gx, gy); updateSelOverlay();
         }
         function up() {
             document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
-            if (moved) { reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); }
+            if (moved) { reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); updateSelOverlay(); }
             // 이동 없이 클릭 + 다중선택이면 이 노드를 정렬 기준(key object)으로 토글
             else if (admin && wasMulti) {
                 keyNode = (keyNode === n.id ? null : n.id); refreshSel();
@@ -920,7 +921,103 @@
             var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(n.id) + '"]'); if (el) { el.style.left = nx + 'px'; el.style.top = ny + 'px'; el.style.width = nw + 'px'; el.style.height = nh + 'px'; }
             renderEdges(); drawGuides(gx, gy);
         }
-        function up() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); }
+        function up() { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); updateSelOverlay(); }
+        document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+    }
+    // ───────── 다중 선택 전체 리사이즈 (공통 바운딩 박스 + 핸들) ─────────
+    // 단일 노드는 위 startResize(노드별 .cres)로, 2개 이상은 선택 전체를 감싸는 박스 핸들로 비례 스케일한다.
+    var selOverlay = null;
+    function ensureSelOverlay() {
+        if (selOverlay) return selOverlay;
+        var d = document.createElement('div');
+        d.className = 'cselbox'; d.style.display = 'none';
+        d.innerHTML = '<span class="cres cres--n" data-dir="n"></span><span class="cres cres--s" data-dir="s"></span>' +
+            '<span class="cres cres--e" data-dir="e"></span><span class="cres cres--w" data-dir="w"></span>' +
+            '<span class="cres cres--nw" data-dir="nw"></span><span class="cres cres--ne" data-dir="ne"></span>' +
+            '<span class="cres cres--sw" data-dir="sw"></span><span class="cres cres--se" data-dir="se"></span>';
+        d.addEventListener('mousedown', function (ev) {
+            var h = ev.target.closest('.cres'); if (!h) return;
+            ev.preventDefault(); ev.stopPropagation(); startGroupResize(ev, h.dataset.dir);
+        });
+        world.appendChild(d); selOverlay = d; return d;
+    }
+    // 스케일 "단위" = 선택된(잠기지 않은) 단위 노드들. selNodes에는 이미 최상위/격리 단위 id가 담긴다.
+    function selUnits() { return selList().filter(function (n) { return n && !n.locked; }); }
+    // 실제 변형 대상 = 단위 + 컨테이너(그룹/아트보드)의 모든 자손(중복 제거, 잠금 제외)
+    function selScaleTargets(units) {
+        var set = {};
+        units.forEach(function (m) { set[m.id] = m; if (isContainer(m)) collectGroupContents(m, set); });
+        return Object.keys(set).map(function (id) { return set[id]; }).filter(function (n) { return !n.locked; });
+    }
+    function selBBox(units) {
+        var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+        units.forEach(function (n) { var r = nodeRect(n); minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); });
+        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+    // 2개 이상 단위가 선택된 편집 모드에서만 공통 박스+핸들을 표시(그 외엔 숨김 → 단일은 기존 .cres 사용)
+    function updateSelOverlay() {
+        var ov = ensureSelOverlay();
+        var units = (admin && selMode() && !stage.classList.contains('is-presenting')) ? selUnits() : [];
+        var show = units.length >= 2;
+        stage.classList.toggle('is-multisel', show);
+        if (!show) { ov.style.display = 'none'; return; }
+        var b = selBBox(units);
+        ov.style.left = b.x + 'px'; ov.style.top = b.y + 'px'; ov.style.width = b.w + 'px'; ov.style.height = b.h + 'px';
+        ov.style.display = 'block';
+    }
+    function startGroupResize(ev, dir) {
+        var units = selUnits(); if (units.length < 2) return;
+        var targets = selScaleTargets(units);
+        var b = selBBox(units), bx = b.x, by = b.y, bw = Math.max(1, b.w), bh = Math.max(1, b.h);
+        var sx0 = ev.clientX, sy0 = ev.clientY, MINB = 16;
+        // 시작값을 잡아두고 매 이동마다 원본 기준으로 다시 계산 → 누적 오차 없음
+        var orig = targets.map(function (n) {
+            var isText = (!n.type || n.type === 'text');
+            return { n: n, x: n.x, y: n.y, w: n.width || 250, h: n.height || 60, fs: isText ? (+n.fontSize || 14) : 0 };
+        });
+        var ov = ensureSelOverlay();
+        function applyTo(o, sx, sy, nbx, nby) {
+            var n = o.n;
+            n.x = nbx + (o.x - bx) * sx; n.y = nby + (o.y - by) * sy;
+            n.width = o.w * sx; n.height = o.h * sy;
+            var el = nodesEl.querySelector('.cnode[data-id="' + cssEsc(n.id) + '"]');
+            if (el) { el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; el.style.width = n.width + 'px'; el.style.height = n.height + 'px'; }
+            if (o.fs) {   // 텍스트: 글자 크기도 함께(비균일이면 면적 제곱근 근사; Shift 비율유지면 sx=sy라 정확)
+                n.fontSize = Math.max(6, o.fs * Math.sqrt(sx * sy));
+                if (el) { var bd = el.querySelector('.cnode__body'); if (bd) bd.style.fontSize = n.fontSize + 'px'; }
+            }
+        }
+        function mv(e) {
+            var dx = (e.clientX - sx0) / view.scale, dy = (e.clientY - sy0) / view.scale;
+            var nbx = bx, nby = by, nbw = bw, nbh = bh;
+            if (dir.indexOf('e') >= 0) nbw = bw + dx;
+            if (dir.indexOf('s') >= 0) nbh = bh + dy;
+            if (dir.indexOf('w') >= 0) { nbw = bw - dx; nbx = bx + dx; }
+            if (dir.indexOf('n') >= 0) { nbh = bh - dy; nby = by + dy; }
+            if (nbw < MINB) { if (dir.indexOf('w') >= 0) nbx -= (MINB - nbw); nbw = MINB; }
+            if (nbh < MINB) { if (dir.indexOf('n') >= 0) nby -= (MINB - nbh); nbh = MINB; }
+            var ar = bw / bh;
+            if (e.shiftKey) {   // Shift = 종횡비 유지 (단일 startResize와 동일 분기)
+                if (dir === 'n' || dir === 's') { var w2 = nbh * ar; nbx = bx + (bw - w2) / 2; nbw = w2; }
+                else { var h2 = nbw / ar; if (dir.indexOf('n') >= 0) nby = by + bh - h2; nbh = h2; }
+            }
+            if (e.altKey) {   // Alt = 중심 고정 대칭 확장
+                var cx = bx + bw / 2, cy = by + bh / 2;
+                var altW = (dir.indexOf('e') >= 0 || dir.indexOf('w') >= 0), altH = (dir.indexOf('n') >= 0 || dir.indexOf('s') >= 0);
+                if (altW) nbw = Math.max(MINB, bw + (nbw - bw) * 2);
+                if (altH) nbh = Math.max(MINB, bh + (nbh - bh) * 2);
+                if (e.shiftKey) { if (altW) nbh = nbw / ar; else if (altH) nbw = nbh * ar; }
+                nbx = cx - nbw / 2; nby = cy - nbh / 2;
+            }
+            var sx = nbw / bw, sy = nbh / bh;
+            orig.forEach(function (o) { applyTo(o, sx, sy, nbx, nby); });
+            ov.style.left = nbx + 'px'; ov.style.top = nby + 'px'; ov.style.width = nbw + 'px'; ov.style.height = nbh + 'px';
+            renderEdges();
+        }
+        function up() {
+            document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+            reflowGroups(); syncGroupFrames(); renderEdges(); markDirty(); render(); updateSelOverlay();
+        }
         document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
     }
     function startConnect(from, side, ev) {

@@ -460,6 +460,10 @@ a.post-nav__item:hover .post-nav__dir { color: var(--teal); }
 .cres--ne { right: -5px; top: -5px; cursor: nesw-resize; }
 .cres--sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
 .cres--se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+/* 다중 선택(2+) 전체 리사이즈: 선택을 감싸는 공통 박스 + 핸들. 박스 본체는 클릭 통과(빈 곳=마퀴 유지), 핸들만 잡힌다 */
+.cselbox { position: absolute; z-index: 6; pointer-events: none; box-shadow: 0 0 0 1px var(--teal); }
+.cselbox .cres { opacity: 1; pointer-events: auto; }
+.canvas-stage.is-multisel .cnode .cres { display: none; }   /* 다중선택 중엔 노드별 리사이즈 핸들 숨김(연결점 .chandle은 유지) */
 
 /* 노드 접기/펼치기 (긴 텍스트 카드) */
 .cnode__fold { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--teal); border-radius: 6px; background: rgba(45,139,139,.12); color: var(--teal); font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer; z-index: 9; opacity: .8; box-shadow: var(--shadow-sm); transition: opacity .15s, color .15s, border-color .15s, background .15s; }
@@ -526,6 +530,7 @@ body:has(.canvas-page) .footer { display: none; }
 .canvas-stage.is-dark .cnode { background: #1d2530; border-color: #2c3a4a; color: #e6edf3; }
 .canvas-stage.is-dark .cnode.is-sel { border-color: #7dd3fc; box-shadow: 0 0 0 3px rgba(125,211,252,.65), 0 0 0 7px rgba(45,139,139,.28), var(--shadow-md); }
 .canvas-stage.is-dark .cnode.is-key { border-color: #7dd3fc; box-shadow: 0 0 0 4px #7dd3fc, 0 0 0 8px rgba(125,211,252,.4), var(--shadow-md); }
+.canvas-stage.is-dark .cselbox { box-shadow: 0 0 0 1px #7dd3fc; }
 .canvas-stage.is-dark .cnode__body { color: #e6edf3; }
 .canvas-stage.is-dark .cnode__link { color: var(--seafoam); }
 .canvas-stage.is-dark .cnode__grouplabel { color: #a8dadc; text-shadow: 0 1px 2px rgba(0,0,0,.45); }
